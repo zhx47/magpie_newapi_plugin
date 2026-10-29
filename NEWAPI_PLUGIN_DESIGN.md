@@ -618,9 +618,12 @@ async function markBlocked(client, auth, md, kind) {
 | 3 | `userId` | text | 老版本/AnyRouter 需要；新版本留空。 |
 | 4 | `siteLabel` | text | 模型命名空间前缀；默认 host。 |
 | 5 | `groupFilter` | text | **仅在站点有 7 个以上分组时**才问。 |
-| 6… | `groupkey:<group>` | password | 每个仍缺 key 的分组一个输入框，标题写 `API key for group "vip"`；留空 = 跳过该分组。已从站点读到的 key 不再问。 |
-| 7 | `checkin` | select | `Auto`（默认）/ `Off`。 |
-| 8 | `autoCreate` | select | 是否让插件为仍缺 key 的分组创建 token（默认 No）。 |
+| 6 | `autoCreate` | select | 有分组缺 key 时先问是否让站点创建。选 Yes 就建 token 并自动 reveal。 |
+| 7 | `createdKeys` | select | 创建步骤的结果（JSON），一次问完；选它即继续。 |
+| 8… | `groupkey:<group>` | password | 只有创建不出来（或第 6 步选 No）才问，每个分组一个输入框。已读到或刚建好的 key 不再问。 |
+| 9 | `checkin` | select | `Auto`（默认）/ `Off`。 |
+
+顺序是先创建、后手填：站点能给的 key 不让人手打。
 
 `ask` 每问一次都会重新判断，所以“已回答”的分组不会重复问。中间结果用 60 秒的 `survey` 缓存，避免每问一次都重读六个端点。
 

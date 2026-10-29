@@ -210,7 +210,7 @@ function pendingGroupsOf(found, inputs, cachedKeys) {
     ...Object.keys(parseGroupKeys(inputs?.groupKeys)),
   ]);
   const wanted = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
-  const have = mergeGroupKeys(cachedKeys, found.fromTokens, parseGroupKeys(inputs?.groupKeys));
+  const have = mergeGroupKeys(cachedKeys, found.fromTokens, createdKeys(inputs), parseGroupKeys(inputs?.groupKeys));
   return sortGroups(wanted.filter((g) => !have[g]?.length));
 }
 
@@ -238,7 +238,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     : { groupKeys: {} };
   const siteCached = directory ? readCachedKeysForSite(directory, found.base) : {};
   let pending = pendingGroupsOf(found, inputs, mergeGroupKeys(siteCached, cached.groupKeys));
-  const autoCreate = inputs?.autoCreate === "yes";
+  const autoCreate = inputs?.autoCreate;
   const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
 
   // A site with a handful of groups needs no filter question; one with many
@@ -252,9 +252,51 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
-  if (pending.length && !autoCreate) {
-    // One group at a time. The answer is kept under groupkey:<group>, so a
-    // group already answered is not asked again and the next one follows.
+  // Creation comes first: a token the site makes needs no typing, so only
+  // what it cannot produce should be asked for by hand.
+  if (pending.length && autoCreate === undefined) {
+    const names = pending.join(", ");
+    return {
+      type: "select",
+      key: "autoCreate",
+      message:
+        `${pending.length} group${pending.length === 1 ? "" : "s"} without a key (${names}). ` +
+        "Let the site create one for each?",
+      options: [
+        { label: "Yes, create a token for each", value: "yes" },
+        { label: "No, I will paste them", value: "no" },
+      ],
+    };
+  }
+
+  // Creating takes a request per group, so it happens once: the answer says
+  // what came of it, and the next call reads that from `createdKeys`.
+  if (pending.length && autoCreate === "yes" && typeof inputs?.[CREATED] !== "string") {
+    const created = await ensureKeys({
+      base: found.base,
+      token: found.token,
+      userId: found.userId,
+      label: cleanLabel(inputs?.siteLabel, hostOf(found.base)),
+      groups: pending,
+      fetchImpl,
+    });
+    const made = Object.keys(created);
+    const failed = pending.filter((g) => !created[g]);
+    const said = made.length ? `Created a key for ${made.join(", ")}.` : "The site created no key.";
+    const left = failed.length
+      ? ` ${failed.join(", ")} still need${failed.length === 1 ? "s" : ""} one pasted by hand: the site would not give it up.`
+      : "";
+    return {
+      type: "select",
+      key: CREATED,
+      message: `${said}${left}`,
+      options: [{ label: left ? "Paste them" : "Continue", value: JSON.stringify(created) }],
+    };
+  }
+
+  // What the site would not produce, one group at a time. The answer is kept
+  // under groupkey:<group>, so a group already answered is not asked again.
+  if (autoCreate !== "yes" || pending.length) {
     for (const group of pending) {
       const at = inputKey(group);
       if (typeof inputs?.[at] === "string") continue;
@@ -285,19 +327,6 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   }
 
   if (inputs?.checkin === undefined) return prompt("checkin");
-  if (inputs?.autoCreate === undefined) {
-    return {
-      type: "select",
-      key: "autoCreate",
-      message: pending.length
-        ? `Create API tokens on the site for ${pending.length} group${pending.length === 1 ? "" : "s"} without a key?`
-        : "Create API tokens on the site when a group has no key?",
-      options: [
-        { label: "No, skip them", value: "no" },
-        { label: "Yes, create a token for each", value: "yes" },
-      ],
-    };
-  }
   return null;
 }
 
@@ -348,6 +377,26 @@ export function inputKey(group) {
   return `groupkey:${group}`;
 }
 
+/** Where the answer to "let the site create the keys" keeps what it made. */
+export const CREATED = "createdKeys";
+
+/** What the "let the site create them" step made, as groupKeys. */
+export function createdKeys(inputs) {
+  const raw = inputs?.[CREATED];
+  if (typeof raw !== "string" || !raw) return {};
+  try {
+    const made = JSON.parse(raw);
+    const out = {};
+    for (const [group, value] of Object.entries(made ?? {})) {
+      const list = (Array.isArray(value) ? value : [value]).map(normalizeApiKey).filter((k) => k && !isMaskedKey(k));
+      if (list.length) out[group] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** The keys pasted in the per-group questions, as groupKeys. */
 export function pastedKeys(inputs) {
   const out = {};
@@ -375,7 +424,7 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
 
   // Keys pasted one group at a time are the freshest, so they win over a
   // cache; the older free-form field still works for anyone used to it.
-  const manual = mergeGroupKeys(parseGroupKeys(inputs?.groupKeys), pastedKeys(inputs));
+  const manual = mergeGroupKeys(parseGroupKeys(inputs?.groupKeys), createdKeys(inputs), pastedKeys(inputs));
   const cached = directory ? readCachedKeys(directory, base, self.id || userId, self.username) : { groupKeys: {} };
   let groupKeys = mergeGroupKeys(cached.groupKeys, fromTokens, manual);
 
@@ -396,7 +445,7 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
   let pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
 
   const autoCreate = inputs?.autoCreate === "yes";
-  if (pending.length && autoCreate) {
+  if (pending.length && autoCreate && !Object.keys(createdKeys(inputs)).length) {
     const created = await ensureKeys({ base, token, userId, label, groups: pending, fetchImpl });
     if (Object.keys(created).length) {
       groupKeys = mergeGroupKeys(groupKeys, created);

@@ -86,7 +86,13 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     const directory = tmpdir();
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "", groupFilter: "default,vip" };
+    // Creation comes first: say no, then the groups are asked one by one.
+    const askNoCreate = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "", groupFilter: "default,vip" };
+    const offer = await ask(askNoCreate);
+    assert.equal(offer.key, "autoCreate", "the site is offered the chance to create keys first");
+    assert.match(offer.message, /2 groups without a key/);
+    assert.match(offer.message, /default, vip/);
+    const head = { ...askNoCreate, autoCreate: "no" };
 
     const q1 = await ask(head);
     assert.match(q1.key, /^groupkey:/);
@@ -104,13 +110,11 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     assert.notEqual(q2.key, q1.key);
     assert.match(q2.message, /"vip"/);
 
-    // Both answered: the check-in switch follows, then autoCreate.
+    // Both answered: the check-in switch follows, and that is the last.
     const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY };
     const q3 = await ask(answered);
     assert.equal(q3.key, "checkin");
-    const q4 = await ask({ ...answered, checkin: "auto" });
-    assert.equal(q4.key, "autoCreate");
-    assert.equal(await ask({ ...answered, checkin: "auto", autoCreate: "no" }), null);
+    assert.equal(await ask({ ...answered, checkin: "auto" }), null);
   } finally {
     await site.close();
   }
@@ -567,7 +571,12 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
     const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "one-site" };
-    const q = await ask(head);
+    // One group is missing, so the site is offered the chance to make its key.
+    const offer = await ask(head);
+    assert.equal(offer.key, "autoCreate");
+    assert.match(offer.message, /svip/);
+    assert.match(offer.message, /1 group without a key/);
+    const q = await ask({ ...head, autoCreate: "no" });
     assert.match(q.key, /^groupkey:/);
     assert.match(q.message, /"svip"/, "only the group still missing is asked");
 
@@ -576,6 +585,43 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     assert.equal(second.metadata.accountId, first.metadata.accountId, "the same account, not a new one");
     assert.deepEqual(second.metadata.groupKeys.default, ["sk-first-default"]);
     assert.deepEqual(second.metadata.groupKeys.vip, ["sk-first-vip"]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("letting the site create keys asks nothing by hand", async () => {
+  const site = await startNewAPI({ reveal: "allow" });
+  try {
+    const directory = tmpdir();
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+    // No token for svip: sign in, then say yes to creation.
+    const head = {
+      baseURL: site.base,
+      accessToken: ACCESS_TOKEN,
+      userId: "",
+      siteLabel: "",
+      groupFilter: "default,vip,svip",
+      autoCreate: "yes",
+    };
+    const made = await ask(head);
+    assert.equal(made.key, "createdKeys", "the answer carries what was created");
+    const created = JSON.parse(made.options[0].value);
+    assert.ok(created.svip?.[0]?.startsWith("sk-created-"), `svip was created: ${JSON.stringify(created)}`);
+
+    // With that answer in hand nothing is asked again, and the account is
+    // signed in with the created key.
+    const next = await ask({ ...head, [made.key]: made.options[0].value });
+    assert.equal(next.key, "checkin");
+
+    const signed = await signIn(
+      { ...head, [made.key]: made.options[0].value },
+      { directory },
+    );
+    assert.equal(signed.type, "success");
+    assert.ok(signed.metadata.groupKeys.svip?.[0]?.startsWith("sk-created-"));
+    assert.deepEqual(signed.metadata.pendingGroups, []);
   } finally {
     await site.close();
   }

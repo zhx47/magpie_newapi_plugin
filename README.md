@@ -26,9 +26,11 @@ magpie plugin login newapi
 | 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
 | 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
 | 5 | Group filter | 只在站点有 **7 个以上分组**时才问；更少就不打扰。 |
-| 6… | **每个缺 key 的分组一个输入框** | 标题直接写 `API key for group "vip"`，一次填一个；留空表示跳过这个分组。已经能从站点读到的 key 不会再问。 |
-| 7 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
-| 8 | Create tokens | 是否允许插件在站点上为仍缺 key 的分组自动创建 token（需要 `api_key:edit` 权限）。 |
+| 6 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**。 |
+| 7 | **每个仍然缺 key 的分组一个输入框** | 只有站点建不出来（或第 6 步选了 No）才会问。标题直接写 `API key for group "vip"`，一次填一个；留空跳过。已经能从站点读到、或刚创建的 key 不会再问。 |
+| 8 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
+
+顺序是**先让站点创建，创建不出来才要人填**——站点能给的 key 不该让人手打一遍。
 
 为什么不再用一行文本框拼 `vip=sk-...;default=sk-...`：分组名和 key 都要手写，容易错位，而且不知道到底缺哪个。现在每个分组一个字段，标题就是分组名。
 
