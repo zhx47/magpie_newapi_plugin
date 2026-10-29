@@ -75,6 +75,8 @@ function isEmptyAnswer(value) {
 /** Module-wide caches, keyed by site and by key hash (never by the key itself). */
 export const caches = {
   status: new TtlCache(10 * 60_000),
+  // A key's verdict from /v1/models, so a listing checks each key once.
+  keyCheck: new TtlCache(5 * 60_000),
   pricing: new TtlCache(TTL_MS),
   modelList: new TtlCache(TTL_MS),
   userModels: new TtlCache(TTL_MS),
@@ -242,6 +244,11 @@ export function accountOf(auth) {
 export function runtimeMd(auth) {
   const { md, base, token, userId } = accountOf(auth);
   return { ...md, baseURL: base, accessToken: token, userId };
+}
+
+/** An account's metadata with the fields a sync owns replaced, the rest kept. */
+export function withMetadata(md, fields) {
+  return { ...(md ?? {}), ...(fields ?? {}) };
 }
 
 /** The group keys an account holds as arrays of full keys. */

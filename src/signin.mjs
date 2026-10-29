@@ -40,6 +40,7 @@ import {
   sortGroups,
 } from "./util.mjs";
 import { TtlCache, cacheKey, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
+import { checkKey } from "./sync.mjs";
 
 const PROVIDER = "newapi";
 
@@ -257,6 +258,23 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     for (const group of pending) {
       const at = inputKey(group);
       if (typeof inputs?.[at] === "string") continue;
+
+      // A key typed on an earlier pass is checked before the next question:
+      // the site is the only thing that can say whether it works, and a
+      // refused one is asked again rather than carried into the account.
+      for (const [key, value] of Object.entries(inputs ?? {})) {
+        if (!key.startsWith("groupkey:") || !value) continue;
+        const forGroup = key.slice("groupkey:".length);
+        const verdict = await checkKey(found.base, value, { fetchImpl });
+        if (verdict.ok || verdict.transient) continue;
+        return {
+          type: "password",
+          key,
+          message: `API key for group "${forGroup}" — ${verdict.why}`,
+          placeholder: "paste another key, or leave empty to skip this group",
+        };
+      }
+
       return {
         type: "password",
         key: at,

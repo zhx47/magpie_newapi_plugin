@@ -79,36 +79,37 @@ test("auth declares one keyless API method that asks its own questions", async (
   }
 });
 
-test("the missing group is asked by name, one field per group", async () => {
-  // reveal denied and nothing pasted: default and vip are missing.
+test("the missing group is asked by name, and a refused key is asked again", async () => {
+  // reveal denied and nothing pasted: the groups the filter names need a key.
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const directory = tmpdir();
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "" };
+    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "", groupFilter: "default,vip" };
 
     const q1 = await ask(head);
     assert.match(q1.key, /^groupkey:/);
     assert.match(q1.message, /"default"/);
     assert.equal(q1.type, "password");
 
-    // Answer that one: the next question is another group, never the same.
-    const q2 = await ask({ ...head, [q1.key]: "sk-pasted-default-1" });
+    // A key the site refuses is asked again, and the question says why.
+    const bad = await ask({ ...head, [q1.key]: "sk-not-a-real-key" });
+    assert.equal(bad.key, q1.key, "the same group is asked again");
+    assert.match(bad.message, /refused/);
+
+    // A working key moves on to the next group, never back to this one.
+    const q2 = await ask({ ...head, [q1.key]: DEFAULT_KEY });
     assert.match(q2.key, /^groupkey:/);
     assert.notEqual(q2.key, q1.key);
+    assert.match(q2.message, /"vip"/);
 
-    const q3 = await ask({ ...head, [q1.key]: "sk-pasted-default-1", [q2.key]: "sk-pasted-vip-2" });
-    assert.match(q3.key, /^groupkey:/);
-    assert.notEqual(q3.key, q1.key);
-    assert.notEqual(q3.key, q2.key);
-
-    // Every group answered: the check-in switch follows, then autoCreate.
-    const answered = { ...head, [q1.key]: "sk-pasted-default-1", [q2.key]: "sk-pasted-vip-2", [q3.key]: "sk-pasted-svip-3" };
-    const q4 = await ask(answered);
-    assert.equal(q4.key, "checkin");
-    const q5 = await ask({ ...answered, checkin: "auto" });
-    assert.equal(q5.key, "autoCreate");
+    // Both answered: the check-in switch follows, then autoCreate.
+    const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY };
+    const q3 = await ask(answered);
+    assert.equal(q3.key, "checkin");
+    const q4 = await ask({ ...answered, checkin: "auto" });
+    assert.equal(q4.key, "autoCreate");
     assert.equal(await ask({ ...answered, checkin: "auto", autoCreate: "no" }), null);
   } finally {
     await site.close();
@@ -265,7 +266,11 @@ test("a Cloudflare check-in marks the account so the next day is one request che
     const before = site.state.requests.length;
     const again = await instance.auth.checkin(async () => saved[0]);
     assert.equal(again.outcome, "captcha");
-    assert.equal(site.state.requests.length, before, "no request once the block is known");
+    // The check-in is not pressed again. The group sync still reads the
+    // account's groups (a GET), which is what keeps a new group from going
+    // unnoticed in an account signed in weeks ago.
+    const pressed = site.state.requests.slice(before).filter((r) => r.method === "POST" && r.path.includes("checkin"));
+    assert.deepEqual(pressed, [], "no check-in POST once the block is known");
   } finally {
     await site.close();
   }
@@ -393,6 +398,91 @@ test("the usage rows that are text carry no share", async () => {
     const balance = usage.windows.find((x) => x.name === "Balance");
     assert.equal(balance.used, undefined);
     assert.equal(typeof balance.balance, "number");
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- following a site whose groups change ---------------------------------
+
+test("a new group at the site reaches an account signed in before it", async () => {
+  // Sign in, then add a group at the site with a key of its own, as an
+  // operator would. Nothing is typed in Magpie after the sign-in.
+  const { site, instance, auth, saved } = await setup({ site: { reveal: "allow" } });
+  try {
+    assert.equal(auth.metadata.groups.later, undefined, "the group did not exist at sign-in");
+
+    site.set({
+      groups: { ...site.state.groups, later: { ratio: 0.5, desc: "added later" } },
+      models: { ...site.state.models, later: ["gpt-4o"] },
+      tokens: [
+        ...site.state.tokens,
+        { id: 77, name: "later", key: VIP_KEY, group: "later", status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
+      ],
+    });
+
+    // A listing alone picks it up: the sync reads the site's groups and the
+    // token list, writes the account back, and the group's models are listed.
+    const models = await instance.provider.models({ models: {} }, { auth });
+    assert.ok(
+      Object.keys(models).some((id) => id.includes("/later/")),
+      `the new group's model is listed: ${Object.keys(models).slice(0, 6).join(", ")}`,
+    );
+
+    const after = saved.at(-1);
+    assert.ok(after, "the account's metadata was written back");
+    assert.ok(after.metadata.groups.later, "the new group is in the account now");
+    assert.equal(after.metadata.groups.later.ratio, 0.5, "with the site's own ratio");
+    assert.ok(after.metadata.groupKeys.later?.length, "and the key found for it");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a key the site refuses is reported as refused, not as working", async () => {
+  const { site, instance, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupKeys: "default=sk-revoked-key" } });
+  try {
+    // A listing checks each key with /v1/models; this one is refused.
+    await instance.provider.models({ models: {} }, { auth }).catch(() => {});
+    const usage = await instance.auth.usage(async () => auth);
+    const row = usage.windows.find((w) => /keys/i.test(w.name));
+    assert.ok(row, `a keys row is shown: ${JSON.stringify(usage.windows)}`);
+    assert.match(row.display, /refused|no key/i);
+  } finally {
+    await site.close();
+  }
+});
+
+test("the check-in reads the groups before it presses, once a day", async () => {
+  const { site, instance, getAuth } = await setup({ site: { checkedInToday: false } });
+  try {
+    const before = site.state.requests.filter((r) => r.path.includes("/groups")).length;
+    const result = await instance.auth.checkin(getAuth);
+    assert.equal(result.outcome, "claimed");
+    const after = site.state.requests.filter((r) => r.path.includes("/groups")).length;
+    assert.ok(after > before, "the groups were read as part of the daily run");
+  } finally {
+    await site.close();
+  }
+});
+
+test("autoCreate fills a group that appeared after sign-in", async () => {
+  const { site, auth, saved } = await setup({ site: { reveal: "allow" }, inputs: { groupFilter: "default" } });
+  try {
+    // A group the operator added, with no token of its own.
+    site.set({
+      groups: { ...site.state.groups, newish: { ratio: 0.9, desc: "new" } },
+      models: { ...site.state.models, newish: ["gpt-4o"] },
+    });
+    const md = { ...auth.metadata, groupFilter: "" };
+    const withAuto = await NewAPI({
+      directory: tmpdir(),
+      client: { auth: { set: async ({ body }) => void saved.push(body) } },
+      magpie: { options: () => ({ "auto-create-keys": true }) },
+    });
+    await withAuto.provider.models({ models: {} }, { auth: { ...auth, metadata: md } }).catch(() => {});
+    const created = site.state.created ?? [];
+    assert.ok(created.some((t) => t.group === "newish"), `a token was created: ${JSON.stringify(created.map((t) => t.group))}`);
   } finally {
     await site.close();
   }

@@ -11,7 +11,8 @@ import { blockedResult, offResult, pressCheckin } from "./src/checkin.mjs";
 import { makeFetch } from "./src/fetch.mjs";
 import { buildModels, discover } from "./src/models.mjs";
 import { PROVIDER, nextQuestion, signIn } from "./src/signin.mjs";
-import { accountOf, caches, groupKeysOf, runtimeMd } from "./src/state.mjs";
+import { accountOf, caches, groupKeysOf, runtimeMd, withMetadata } from "./src/state.mjs";
+import { groupsNeedingAttention, syncAccount } from "./src/sync.mjs";
 import { buildUsage } from "./src/usage.mjs";
 
 const pkg = {
@@ -114,9 +115,12 @@ async function listingOf(auth, options, hostModels) {
 }
 
 /** The models hook, shared by the provider declaration. */
-async function modelsFor(provider, auth, options) {
+async function modelsFor(input, provider, auth, options) {
   if (!auth) return {};
-  const { md, groups, built } = await listingOf(auth, options, provider?.models ?? {});
+  // The list is what a reader picks from, so a group added to the site since
+  // the sign-in is settled here too (on a slow clock: see sync.mjs).
+  const current = await refreshAccount(input, auth, { autoCreate: options.autoCreateKeys });
+  const { md, groups, built } = await listingOf(current ?? auth, options, provider?.models ?? {});
   const haveKeys = Object.keys(groupKeysOf(md)).length > 0;
   // Every key failed, or the site answered nothing: throw so Magpie keeps the
   // list it had and says why, instead of emptying the picker. A site that
@@ -158,8 +162,11 @@ export const NewAPI = async (input) => {
         const auth = await getAuth();
         const { base, token } = accountOf(auth);
         if (!base || !token) return { error: "not signed in", windows: [] };
+        // A site's groups change under an account that was signed in weeks
+        // ago; the card is where a reader looks, so it is refreshed here too.
+        const fresh = await refreshAccount(input, auth, { autoCreate: options().autoCreateKeys });
         try {
-          return await buildUsage(runtimeMd(auth));
+          return await buildUsage(runtimeMd(fresh ?? auth));
         } catch (e) {
           // A balance read is not the account's health: a refused token, a
           // hidden endpoint or a dropped connection all leave the group keys
@@ -172,12 +179,22 @@ export const NewAPI = async (input) => {
         const auth = await getAuth();
         const { md, base, token } = accountOf(auth);
         if (!base || !token) return { outcome: "failed", message: "not signed in" };
-        if (md.checkin === "off") return offResult();
-        if (md.checkinBlocked) return blockedResult(md.checkinBlocked);
+
+        // Once a day, whether or not the site checks in: a new group, a
+        // revoked key and a key the plugin may create are all settled here.
+        const fresh = await refreshAccount(input, auth, {
+          autoCreate: options().autoCreateKeys,
+          force: true,
+        });
+        const current = fresh ?? auth;
+        const cur = accountOf(current).md;
+
+        if (cur.checkin === "off") return offResult();
+        if (cur.checkinBlocked) return blockedResult(cur.checkinBlocked);
 
         let result;
         try {
-          result = await pressCheckin(runtimeMd(auth));
+          result = await pressCheckin(runtimeMd(current));
         } catch (e) {
           if (e instanceof ChallengeError) {
             await markCheckinBlocked(input, auth, e.code);
@@ -189,7 +206,7 @@ export const NewAPI = async (input) => {
           return { outcome: "failed", message: describe(e) };
         }
         if (result.blocked) {
-          await markCheckinBlocked(input, auth, result.blocked);
+          await markCheckinBlocked(input, current, result.blocked);
           return { outcome: "captcha", message: result.message };
         }
         return result;
@@ -199,7 +216,7 @@ export const NewAPI = async (input) => {
     provider: {
       id: PROVIDER,
       async models(provider, { auth } = {}) {
-        return modelsFor(provider, auth, options());
+        return modelsFor(input, provider, auth, options());
       },
     },
   };
@@ -210,6 +227,33 @@ export const NewAPI = async (input) => {
 // treats each function export as a plugin function, which is why the
 // helpers below are not exported from this entry.)
 export default { id: PROVIDER, server: NewAPI };
+
+/**
+ * Bring the account's group list and key verdicts up to date, writing back
+ * only what changed. Returns the account as it now stands, or null when the
+ * write failed (the caller goes on with what it read).
+ */
+async function refreshAccount(input, auth, { autoCreate = false, force = false } = {}) {
+  const { md} = accountOf(auth);
+  let synced;
+  try {
+    synced = await syncAccount({ ...runtimeMd(auth) }, { autoCreate, force });
+  } catch {
+    return null; // a site that is down answers nothing; keep what we have
+  }
+  if (!synced.changed) return synced.notes?.length ? { ...auth, metadata: withMetadata(md, synced.fields) } : null;
+  const next = { ...auth, metadata: withMetadata(md, synced.fields) };
+  try {
+    await input?.client?.auth?.set?.({ path: { id: PROVIDER }, body: next });
+    // The listing kept for this account was made from the old groups.
+    caches.modelList.clear();
+    caches.userModels.clear();
+    caches.usage.clear();
+  } catch {
+    // not saved: the next sync tries again
+  }
+  return next;
+}
 
 /** Remember that the site challenged the check-in, so the next day is one request cheaper. */
 async function markCheckinBlocked(input, auth, kind) {

@@ -7,7 +7,8 @@
 // `display`) are read, never counted, so they cannot skew routing.
 
 import { getStatus, getUserSelf } from "./api.mjs";
-import { caches, cacheKey, missingGroups } from "./state.mjs";
+import { caches, cacheKey } from "./state.mjs";
+import { groupsNeedingAttention } from "./sync.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo, quotaUnit } from "./util.mjs";
 
 /** The account's own numbers, cached briefly: balances move slowly. */
@@ -87,12 +88,18 @@ export async function buildUsage(md, opts = {}) {
     },
   ];
 
-  // Reckoned now: a key pasted since sign-in drops off without a re-login.
-  const pending = missingGroups(md);
-  if (pending.length) {
+  // Reckoned now, from the groups and the key verdicts of the last sync:
+  // a group with no key, and one whose key the site refuses.
+  const needy = groupsNeedingAttention(md);
+  if (needy.length) {
+    const missing = needy.filter((n) => n.state === "missing").map((n) => n.group);
+    const refused = needy.filter((n) => n.state === "refused");
+    const bits = [];
+    if (missing.length) bits.push(`no key: ${missing.join(", ")}`);
+    if (refused.length) bits.push(`refused: ${refused.map((n) => `${n.group} (${n.why})`).join(", ")}`);
     windows.push({
-      name: "Missing keys",
-      display: `${pending.join(", ")} — sign in again to add them`,
+      name: missing.length ? "Missing keys" : "Refused keys",
+      display: `${bits.join(" · ")} — sign in again to replace them`,
     });
   }
 

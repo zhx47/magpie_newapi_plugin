@@ -343,6 +343,8 @@ function chooseProtocols(endpoints, model, settings) {
 
 ### 3.5 分组 key 生命周期
 
+> **实现补充：分组会变，所以同步不只在登录时发生。** `src/sync.mjs` 的 `syncAccount()` 在每次列模型、读用量（10 分钟节流）和每次签到（强制）时运行：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token，把结果写回账号 metadata（`client.auth.set`）。已登录的账号因此不需要重登就能跟上新增分组；被吊销的 key 记为 `keyProblems[group]`，在用量卡片上显示为 **Refused keys**。
+
 #### 3.5.1 发现
 
 1. `GET /api/token/?p=0&page_size=100` 拿 token 列表。

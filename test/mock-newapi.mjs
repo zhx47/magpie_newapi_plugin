@@ -131,6 +131,10 @@ export async function startNewAPI(options = {}) {
     quota: options.quota ?? 5_000_000,
     usedQuota: options.usedQuota ?? 1_000_000,
     checkedInToday: options.checkedInToday ?? false,
+    // The site's groups and their models, mutable: an operator adds or
+    // removes them, and a test does the same.
+    groups: { ...GROUPS },
+    models: { ...GROUP_MODELS },
     // Some builds (v1.0.0-rc.46) only have /api/user/checkin for both GET
     // and POST; the self route is a 404 there.
     legacyCheckinOnly: options.legacyCheckinOnly ?? false,
@@ -207,7 +211,7 @@ export async function startNewAPI(options = {}) {
         success: true,
         data: PRICING,
         group_ratio: { default: 1, vip: 0.8, svip: 0.6 },
-        usable_group: GROUPS,
+        usable_group: state.groups,
         auto_groups: ["vip"],
         pricing_version: "test",
       });
@@ -237,14 +241,14 @@ export async function startNewAPI(options = {}) {
 
     if (url.pathname === "/api/user/self/groups" || url.pathname === "/api/user/groups") {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
-      json({ success: true, data: GROUPS });
+      json({ success: true, data: state.groups });
       return;
     }
 
     if (url.pathname === "/api/user/models") {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
       const group = url.searchParams.get("group") || "";
-      const models = group ? GROUP_MODELS[group] ?? [] : [...new Set(Object.values(GROUP_MODELS).flat())];
+      const models = group ? state.models[group] ?? [] : [...new Set(Object.values(state.models).flat())];
       json({ success: true, data: models });
       return;
     }
@@ -307,7 +311,7 @@ export async function startNewAPI(options = {}) {
     if (url.pathname === "/v1/models" || url.pathname === "/v1beta/models") {
       const t = state.tokens.find((x) => x.key === apiKey);
       if (!t) return json({ error: { message: "invalid token", type: "invalid_request_error" } }, 401);
-      const models = GROUP_MODELS[t.group] ?? [];
+      const models = state.models[t.group] ?? [];
       if (url.pathname === "/v1beta/models") {
         json({ models: models.map((m) => ({ name: `models/${m}` })) });
       } else {

@@ -53,6 +53,27 @@ newapi/<siteLabel>/<group>/<model>
 
 ## 分组 key
 
+### 分组是会变的
+
+站点的分组不是固定的：管理员会新增、改名、关闭分组，key 也会被吊销。插件因此会在**账号登录之后**继续跟进：
+
+| 时机 | 做什么 |
+| --- | --- |
+| 每次列模型（`provider.models`） | 距上次同步超过 10 分钟才真的去读，避免每次刷新都打站点 |
+| 每次签到（每天一次） | 强制同步一遍：读分组、检查 key、必要时建 key |
+| 每次读用量（用量卡片） | 同上，按 10 分钟节流 |
+
+同步做四件事：
+
+1. 读 `/api/user/self/groups`，把新分组加进账号、把消失的分组标记出来（key 保留，站点若恢复分组就能用）；
+2. 读 `/api/token/`，对仍然缺 key 的分组尝试 `batch/keys` / `:id/key` reveal——站点已经有的 key 不需要你再登一次；
+3. 用 `/v1/models` 校验现有的每个 key，被拒的记录成 `refused`；
+4. 若打开了 `auto-create-keys`，为仍缺 key 的分组创建 token。
+
+结果写回账号的 metadata，所以**不需要重新登录**就能看到新分组。
+
+### 首次登录或补 key
+
 登录时插件会：
 
 1. 读 `/api/token/` 的 token 列表（站点返回的 key 是掩码）；
@@ -62,6 +83,8 @@ newapi/<siteLabel>/<group>/<model>
 
 补 key 的流程：`magpie plugin login newapi` → 填 base URL 和 access token（或直接回车用缓存）→ 插件只问仍然缺的那些分组，一个分组一个输入框。
 
+**填进去的 key 会当场用 `/v1/models` 校验**：站点拒绝时，同一个分组会再问一次，并在标题里说明原因（`API key for group "vip" — the site refused it`）。留空则跳过该分组。
+
 站点不允许读取 key（403 / 安全验证）时，手动回填是唯一的办法；插件不会尝试绕过。
 
 同一分组可以有多个 key，按顺序轮换，一个被拒（401/403/429）会试下一个。坏 key 只影响该分组，不会把整个站点账号标记为失效。
@@ -69,8 +92,9 @@ newapi/<siteLabel>/<group>/<model>
 ## 余额与签到
 
 - 余额：`/api/user/self` 的 `quota`，按 `/api/status` 的 `quota_per_unit` 换算（默认 500000 quota = $1）。站点关闭货币显示时按原始 quota 显示。
-- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Missing keys」是纯文本行，不会画进度条，也不会显示 `0%`。
+- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Missing keys / Refused keys」是纯文本行，不会画进度条，也不会显示 `0%`。
   （Magpie 把带 `used` 的窗口当比例；这些行不发送 `used`，所以不会被误画成 0%。）
+- **Refused keys** 一行列出被站点拒绝的 key 及其原因；**Missing keys** 一行列出完全没有 key 的分组。两者都提示重新登录补上。
 - 签到：`/api/user/self/checkin`，旧版本回退 `/api/user/checkin`。
 
 ### 签到开关与 Cloudflare
