@@ -82,7 +82,10 @@ newapi/<siteLabel>/<group>/<model>
 1. 读 `/api/user/self/groups`，把新分组加进账号、把消失的分组标记出来（key 保留，站点若恢复分组就能用）；
 2. 读 `/api/token/`，对仍然缺 key 的分组尝试 `batch/keys` / `:id/key` reveal——站点已经有的 key 不需要你再登一次；
 3. 用 `/v1/models` 校验现有的每个 key，被拒的记录成 `refused`；
-4. 若打开了 `auto-create-keys`，为仍缺 key 的分组创建 token。
+4. 若打开了 `auto-create-keys`，为仍缺 key 的分组创建 token——**只在站点确实没有该组的 token 时才建**：
+   - 站点已有该组的 token → 只 reveal，不新建；
+   - 建了但 key 读不出来 → 记进 `createAttempted`，**下次不会再建**，等你自己填；
+   - 建过的分组在拿到 key 之后自动从 `createAttempted` 里清掉。
 
 结果写回账号的 metadata，所以**不需要重新登录**就能看到新分组。
 

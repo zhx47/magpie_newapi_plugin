@@ -82,27 +82,92 @@ export async function readGroups({ base, token, userId, fetchImpl }) {
   }
 }
 
-/** Create tokens for the named groups and reveal them; what failed stays out. */
-export async function createKeysFor({ base, token, userId, label, groups, fetchImpl, max = 5 }) {
+/**
+ * Keys for the groups that have none.
+ *
+ * A group is only created for when its token list has no usable token at
+ * all: a token the site already holds is reused (its key revealed), never
+ * duplicated. A group whose token was made but whose key could not be
+ * revealed is reported as `attempted`, so the caller can leave it to the
+ * user instead of making another one on the next run — the bug this fixes
+ * made a hundred tokens for one group.
+ *
+ * The new token is found by the ids the list did not have before, not by
+ * its name: a name is truncated and stamped, and a mismatch used to look
+ * like "nothing was created" and be retried for ever.
+ */
+export async function createKeysFor({ base, token, userId, label, groups, tokens, fetchImpl, max = 5 }) {
   const created = {};
-  const wanted = sortGroups(groups ?? []).slice(0, max);
+  const attempted = [];
+  const wanted = sortGroups(groups ?? []);
+  if (!wanted.length) return { created, attempted };
+
+  /** The newest usable token of a group among tokens, or undefined. */
+  const existingOf = (group) =>
+    (tokens ?? [])
+      .filter((t) => (t.group || "default") === group && tokenUsable(t))
+      .sort((a, b) => b.id - a.id)[0];
+
+  // A token the site already has is better than one more: reveal it.
+  const toReveal = [];
   for (const group of wanted) {
+    const have = existingOf(group);
+    if (have) toReveal.push(have);
+  }
+  if (toReveal.length) {
+    try {
+      const revealed = await revealTokenKeys(base, token, userId, toReveal.map((t) => t.id), { fetchImpl });
+      for (const tk of toReveal) {
+        const key = revealed.get(tk.id);
+        if (key) created[tk.group || "default"] = [key];
+      }
+    } catch {
+      // not readable: the caller falls back to asking for it
+    }
+  }
+
+  for (const group of wanted.filter((g) => !created[g]).slice(0, max)) {
+    // One more look: the reveal above may have missed a group that has a
+    // token this call did not see.
+    if (existingOf(group)) {
+      attempted.push(group);
+      continue;
+    }
+
+    const before = new Set((tokens ?? []).map((t) => t.id));
     const stamp = Date.now().toString(36).slice(-5);
     const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
     const name = `magpie-${cleanLabel(label, "site")}-${safe}-${stamp}`.slice(0, 50);
+
     try {
       await createToken(base, token, userId, group, name, { fetchImpl });
-      const tokens = await listTokens(base, token, userId, { fetchImpl });
-      const mine = tokens.filter((t) => t.name === name && t.group === group).sort((a, b) => b.id - a.id)[0];
-      if (!mine) continue;
-      const revealed = await revealTokenKeys(base, token, userId, [mine.id], { fetchImpl });
-      const key = revealed.get(mine.id);
-      if (key) created[group] = [key];
     } catch {
-      // the token may exist without its key being readable: the user pastes it
+      // the site refused to make one: leave it to the user, and do not try
+      // again on the next run
+      attempted.push(group);
+      continue;
+    }
+
+    try {
+      const after = (await listTokens(base, token, userId, { fetchImpl })).filter((t) => t.group === group);
+      const made = after.filter((t) => !before.has(t.id)).sort((a, b) => b.id - a.id)[0] ?? existingOf(group);
+      if (!made) {
+        attempted.push(group);
+        continue;
+      }
+      const revealed = await revealTokenKeys(base, token, userId, [made.id], { fetchImpl });
+      const key = revealed.get(made.id);
+      if (key) created[group] = [key];
+      else attempted.push(group);
+    } catch {
+      // the token exists but its key is not readable: the user pastes it,
+      // and no second one is made
+      attempted.push(group);
     }
   }
-  return created;
+
+  for (const group of wanted.slice(max)) attempted.push(group);
+  return { created, attempted };
 }
 
 /** Only the metadata fields this sync owns. */
@@ -113,6 +178,7 @@ function slice(md) {
     pendingGroups: Array.isArray(md.pendingGroups) ? md.pendingGroups : [],
     keyProblems: md.keyProblems ?? {},
     keyInfo: md.keyInfo ?? {},
+    createAttempted: Array.isArray(md.createAttempted) ? md.createAttempted : [],
   };
 }
 
@@ -174,12 +240,14 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
 
   let groupKeys = { ...before.groupKeys };
   const keyProblems = {};
+  let siteTokens = [];
 
   // A key the site hands out for a group is the best one there is: read the
   // token list and reveal what may be revealed, so a group added (or a token
   // created elsewhere) needs no second sign-in.
   try {
     const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }))) ?? [];
+    siteTokens = tokens;
     const usable = tokens.filter((tk) => tokenUsable(tk));
     const missingGroup = (tk) => !groupKeys[tk.group || "default"]?.length;
     const ids = usable.filter(missingGroup).map((tk) => tk.id);
@@ -237,20 +305,30 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
   let pending = sortGroups(wanted.filter((g) => !groupKeys[g]?.length));
 
   // Keys for the groups that have none, when the user allowed creating them.
-  if (autoCreate && pending.length && left() > 1500) {
-    const created = (await inTime(createKeysFor({
-      base,
-      token,
-      userId,
-      label: md?.siteLabel ?? "",
-      groups: pending,
-      fetchImpl,
-    }))) ?? {};
-    if (Object.keys(created).length) {
-      groupKeys = mergeGroupKeys(groupKeys, created);
-      pending = sortGroups(wanted.filter((g) => !groupKeys[g]?.length));
-      notes.push(`created a key for ${Object.keys(created).join(", ")}`);
+  // A group the site already gave a key for, or one whose key it would not
+  // hand over, is not tried again on the next run: making a second token
+  // because the first could not be read is how one group ended up with a
+  // hundred of them.
+  const attempted = new Set(before.createAttempted ?? []);
+  const toTry = pending.filter((g) => !attempted.has(g));
+  if (autoCreate && toTry.length && left() > 1500) {
+    const made = (await inTime(
+      createKeysFor({
+        base,
+        token,
+        userId,
+        label: md?.siteLabel ?? "",
+        groups: toTry,
+        tokens: siteTokens,
+        fetchImpl,
+      }),
+    )) ?? { created: {}, attempted: [] };
+    if (Object.keys(made.created).length) {
+      groupKeys = mergeGroupKeys(groupKeys, made.created);
+      notes.push(`created a key for ${Object.keys(made.created).join(", ")}`);
     }
+    for (const group of made.attempted ?? []) attempted.add(group);
+    pending = sortGroups(wanted.filter((g) => !groupKeys[g]?.length));
   }
 
   // The fetch reads keyInfo to pick a key; a refused one is marked there so
@@ -271,13 +349,15 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     pendingGroups: pending,
     keyProblems,
     keyInfo,
+    createAttempted: sortGroups([...attempted].filter((g) => !groupKeys[g]?.length)),
   };
   const changed =
     !same(fields.groups, before.groups) ||
     !same(fields.groupKeys, before.groupKeys) ||
     !same(fields.pendingGroups, before.pendingGroups) ||
     !same(fields.keyProblems, before.keyProblems) ||
-    !same(fields.keyInfo, before.keyInfo);
+    !same(fields.keyInfo, before.keyInfo) ||
+    !same(fields.createAttempted, before.createAttempted);
   return { fields, changed, notes };
 }
 

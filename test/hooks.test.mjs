@@ -705,3 +705,71 @@ test("a new site is still one of the choices", async () => {
     await site.close();
   }
 });
+
+// ---- creation must never repeat ------------------------------------------
+
+test("a group whose token cannot be revealed gets no second token", async () => {
+  // The site creates tokens but will not hand their keys over. Before the
+  // fix every sync made another one: a hundred tokens for one group.
+  const { site, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupFilter: "default" } });
+  try {
+    site.set({
+      groups: { ...site.state.groups, stuck: { ratio: 0.5, desc: "stuck" } },
+      models: { ...site.state.models, stuck: ["gpt-4o"] },
+    });
+    const dir = tmpdir();
+    const saved = [];
+    const instance = await NewAPI({
+      directory: dir,
+      client: { auth: { set: async ({ body }) => void saved.push(body) } },
+      magpie: { options: () => ({ "auto-create-keys": true }) },
+    });
+    const mdBase = { ...auth.metadata, groupFilter: "", createAttempted: [] };
+
+    // Three runs, as days would be; each forces the sync.
+    for (let day = 0; day < 3; day++) {
+      await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: mdBase }));
+      // The sync's own throttle is per account and ten minutes; a new
+      // account id per run stands in for the next day.
+      mdBase.baseURL = site.base;
+      const made = site.state.created.filter((t) => t.group === "stuck");
+      assert.ok(made.length <= 1, `day ${day}: ${made.length} tokens made for one group`);
+      if (made.length) break;
+    }
+    const made = site.state.created.filter((t) => t.group === "stuck");
+    assert.equal(made.length, 1, `exactly one token, not ${made.length}`);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a group that already has a token is reused, not duplicated", async () => {
+  const site = await startNewAPI({ reveal: "allow" });
+  try {
+    const dir = tmpdir();
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupFilter: "default" }, { directory: dir });
+    const auth = { type: "api", key: signed.key, metadata: signed.metadata };
+    // The operator adds a group and makes a token for it themselves.
+    site.set({
+      groups: { ...site.state.groups, added: { ratio: 1, desc: "" } },
+      models: { ...site.state.models, added: ["gpt-4o"] },
+      tokens: [...site.state.tokens, { id: 88, name: "theirs", key: VIP_KEY, group: "added", status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true }],
+    });
+    const before = site.state.created.length;
+
+    const instance = await NewAPI({
+      directory: dir,
+      client: { auth: { set: async () => {} } },
+      magpie: { options: () => ({ "auto-create-keys": true }) },
+    });
+    const md = { ...auth.metadata, groupFilter: "" };
+    await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: md }));
+
+    // svip has no token at all, so one is made for it; `added` has one, and
+    // must not get a second.
+    const added = site.state.created.filter((t) => t.group === "added");
+    assert.equal(added.length, 0, `a token was made for a group that had one: ${JSON.stringify(added)}`);
+  } finally {
+    await site.close();
+  }
+});

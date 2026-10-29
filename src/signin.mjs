@@ -40,7 +40,7 @@ import {
   sortGroups,
 } from "./util.mjs";
 import { TtlCache, cacheKey, knownAccounts, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
-import { checkKey } from "./sync.mjs";
+import { checkKey, createKeysFor } from "./sync.mjs";
 
 const PROVIDER = "newapi";
 
@@ -98,33 +98,8 @@ function tokenName(label, group, stamp) {
  * Create tokens for the groups that have none, then find and reveal them.
  * Best effort: whatever fails stays missing and is reported to the user.
  */
-export async function ensureKeys({ base, token, userId, label, groups, fetchImpl, max = 5 }) {
-  const created = {};
-  const wanted = sortGroups(groups ?? []);
-  if (!wanted.length) return created;
-
-  for (const group of wanted.slice(0, max)) {
-    const stamp = Date.now().toString(36).slice(-5);
-    const name = tokenName(label, group, stamp);
-    try {
-      await createToken(base, token, userId, group, name, { fetchImpl });
-    } catch {
-      continue;
-    }
-    try {
-      const tokens = await listTokens(base, token, userId, { fetchImpl });
-      const mine = tokens
-        .filter((t) => t.name === name && t.group === group)
-        .sort((a, b) => b.id - a.id)[0];
-      if (!mine) continue;
-      const revealed = await revealTokenKeys(base, token, userId, [mine.id], { fetchImpl });
-      const key = revealed.get(mine.id);
-      if (key) created[group] = [key];
-    } catch {
-      // the token exists but its key is not readable: the user pastes it
-    }
-  }
-  return created;
+export async function ensureKeys({ base, token, userId, label, groups, tokens, fetchImpl, max = 5 }) {
+  return createKeysFor({ base, token, userId, label, groups, tokens, fetchImpl, max });
 }
 
 // The questions run one per call, and each needs the site's groups: without
@@ -295,17 +270,19 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   // Creating takes a request per group, so it happens once: the answer says
   // what came of it, and the next call reads that from `createdKeys`.
   if (pending.length && autoCreate === "yes" && typeof inputs?.[CREATED] !== "string") {
-    const created = await ensureKeys({
+    const made = await ensureKeys({
       base: found.base,
       token: found.token,
       userId: found.userId,
       label: cleanLabel(inputs?.siteLabel, hostOf(found.base)),
       groups: pending,
+      tokens: found.tokens ?? [],
       fetchImpl,
     });
-    const made = Object.keys(created);
+    const created = made.created ?? {};
+    const keys = Object.keys(created);
     const failed = pending.filter((g) => !created[g]);
-    const said = made.length ? `Created a key for ${made.join(", ")}.` : "The site created no key.";
+    const said = keys.length ? `Created a key for ${keys.join(", ")}.` : "The site created no key.";
     const left = failed.length
       ? ` ${failed.join(", ")} still need${failed.length === 1 ? "s" : ""} one pasted by hand: the site would not give it up.`
       : "";
@@ -492,7 +469,16 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
 
   const autoCreate = inputs?.autoCreate === "yes";
   if (pending.length && autoCreate && !Object.keys(createdKeys(inputs)).length) {
-    const created = await ensureKeys({ base, token, userId, label, groups: pending, fetchImpl });
+    const made = await ensureKeys({
+      base,
+      token,
+      userId,
+      label,
+      groups: pending,
+      tokens,
+      fetchImpl,
+    });
+    const created = made.created ?? {};
     if (Object.keys(created).length) {
       groupKeys = mergeGroupKeys(groupKeys, created);
       pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
