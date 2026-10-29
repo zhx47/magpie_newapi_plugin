@@ -43,6 +43,42 @@ export function readTarget(pathname, bodyText) {
   return null;
 }
 
+/**
+ * The request's path under the account's own site.
+ *
+ * Magpie builds the URL from the model list, and that list is merged across
+ * accounts by model id (`host.js`: `models[k] ??= m`). Two accounts of one
+ * site with the same label produce one entry, whose `api.url` and `api.id`
+ * come from whichever account listed it first. Signing the request with the
+ * second account's key while sending it to the first's address would spend
+ * the wrong account at the wrong host, so the account's own base and its own
+ * default group win here.
+ *
+ * A URL already at this account's site keeps the path Magpie made (its
+ * `/v1/chat/completions`, its `/v1beta/models/<id>:streamGenerateContent`);
+ * one at another site is rebuilt from this account's base and the protocol
+ * the path names.
+ */
+export function ownURL(href, md) {
+  const base = String(md?.baseURL ?? "").replace(/\/+$/, "");
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return { href, sameSite: true };
+  }
+  const mine = base ? new URL(base) : null;
+  const sameSite = !!mine && url.origin === mine.origin && url.pathname.startsWith(`${mine.pathname.replace(/\/+$/, "")}/`);
+  if (sameSite || !base) return { href, sameSite: true };
+
+  // The part of the path that is New API's API, not a prefix the other
+  // site's proxy happens to have: everything from `/v1beta/` or `/v1/` on.
+  const at = url.pathname.search(/\/(v1beta|v1)\//);
+  const path = at >= 0 ? url.pathname.slice(at) : url.pathname;
+  const qs = url.search || "";
+  return { href: `${base}${path}${qs}`, sameSite: false };
+}
+
 /** Replace the body's model with the bare one, keeping everything else. */
 export function rewriteBodyModel(bodyText, model) {
   if (!model || typeof bodyText !== "string") return bodyText;
@@ -76,7 +112,6 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
     const auth = await getAuth();
     const md = auth?.metadata ?? {};
     const groupKeys = nonEmptyKeys(md.groupKeys);
-    const base = String(md.baseURL ?? "");
 
     const href = typeof input === "string" ? input : input?.url ?? String(input);
     let url;
@@ -88,7 +123,21 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
 
     const bodyText = typeof init.body === "string" ? init.body : init.body ? String(init.body) : "";
     const target = readTarget(url.pathname, bodyText);
-    const group = target?.group || defaultGroup(md, groupKeys);
+
+    // The model list Magpie built this URL from is merged across accounts by
+    // model ID, so its `api.url` and the group in `api.id` may be another
+    // account's. Send to this account's own site, and sign for a group this
+    // account actually has.
+    const own = ownURL(href, md);
+    const ownPath = new URL(own.href).pathname;
+    const fallbackGroup = defaultGroup(md, groupKeys);
+    const named = target?.group ?? "";
+    // A group this account knows but has no key for is the user's to fix:
+    // answering it with another group's key would spend the wrong group.
+    // A group it has never seen came from another account's model, so the
+    // account's own default group is what that request means here.
+    const known = Object.prototype.hasOwnProperty.call(md.groups ?? {}, named);
+    const group = !named || groupKeys[named] ? named || fallbackGroup : known ? named : fallbackGroup;
     const model = target?.model ?? "";
 
     const keys = keysToTry(groupKeys, group, model, {}, 2);
@@ -99,7 +148,7 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
       );
     }
 
-    const style = authStyleOf(url.pathname);
+    const style = authStyleOf(ownPath);
     let lastResponse = null;
     let lastError = null;
 
@@ -117,10 +166,10 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
       else if (style === "gemini") headers.set("x-goog-api-key", key);
       else headers.set("authorization", `Bearer ${key}`);
 
-      let nextHref = href;
+      let nextHref = own.href;
       let nextBody = init.body;
       if (target) {
-        if (style === "gemini") nextHref = rewriteGeminiPath(href, model);
+        if (style === "gemini") nextHref = rewriteGeminiPath(own.href, model);
         else if (typeof bodyText === "string" && bodyText) nextBody = rewriteBodyModel(bodyText, model);
       }
 

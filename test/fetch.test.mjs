@@ -45,3 +45,40 @@ test("wireId stays safe in a Gemini path", () => {
   const seg = href.split("/models/")[1].split(":")[0];
   assert.deepEqual(readTarget(`/v1beta/models/${seg}:generateContent`, ""), { group: "vip", model: "vendor/model:beta" });
 });
+
+// ---- the URL always belongs to the account doing the asking ---------------
+
+import { ownURL } from "../src/fetch.mjs";
+
+test("a URL at the account's own site is left exactly as Magpie built it", () => {
+  const md = { baseURL: "https://a.example.com" };
+  const href = "https://a.example.com/v1/chat/completions";
+  const got = ownURL(href, md);
+  assert.equal(got.sameSite, true);
+  assert.equal(got.href, href);
+});
+
+test("a URL at another site is rebuilt on the account's own base", () => {
+  // The merged model list gave the first account's api.url (site A) while the
+  // account doing the asking is site B: sending there would sign A's request
+  // with B's key.
+  const md = { baseURL: "https://b.example.com" };
+  const got = ownURL("https://a.example.com/v1/chat/completions", md);
+  assert.equal(got.sameSite, false);
+  assert.equal(got.href, "https://b.example.com/v1/chat/completions");
+});
+
+test("a rebuilt Gemini URL keeps its model and action", () => {
+  const md = { baseURL: "https://b.example.com" };
+  const id = encodeURIComponent(JSON.stringify(["vip", "gemini-2.5-pro"]));
+  const got = ownURL(`https://a.example.com/v1beta/models/${id}:streamGenerateContent?alt=sse`, md);
+  assert.equal(got.href, `https://b.example.com/v1beta/models/${id}:streamGenerateContent?alt=sse`);
+});
+
+test("a base with a path prefix is respected", () => {
+  const md = { baseURL: "https://proxy.example.com/newapi" };
+  const got = ownURL("https://a.example.com/v1/messages", md);
+  assert.equal(got.href, "https://proxy.example.com/newapi/v1/messages");
+  // and a request already under it is left alone
+  assert.equal(ownURL("https://proxy.example.com/newapi/v1/messages", md).sameSite, true);
+});

@@ -112,7 +112,8 @@ newapi/<siteLabel>/<group>/<model>
 ## 限制
 
 - **一个 provider**：所有站点都挂在 `newapi` 下，站点体现在账号和模型 ID 里。Magpie 的 `auth.provider` 是静态的，无法每个站点动态生成 Provider 卡片。
-- **`siteLabel` 必须区分同一站点的多个账号**。模型 ID 是 `<siteLabel>/<group>/<model>`，同一站点第二个账号若沿用同一个 `siteLabel`，两者的模型 ID 会完全相同，Magpie 按 ID 合并账号的模型表时后一个会被前一个盖住。登录同一站点的第二个账号时，把 `siteLabel` 填成能区分的值，例如 `example.com` 和 `example.com-bob`（不填也不会撞，因为默认 label 是 host，但两个账号配同一个显式 label 就会）。
+- **同一站点的多个账号建议用不同的 `siteLabel`**。模型 ID 是 `<siteLabel>/<group>/<model>`；Magpie 把各账号的模型表按 ID 合并展示（`host.js` 的 `models[k] ??= m`），所以两个账号撞了 label 时，选择器里只出现一份。
+  但**请求不会走错账号**：每个账号的 `accounts[].models` 仍各自记着这个 ID，路由时第二个账号照样是候选（第一个失败会 failover 过去），而且插件在 `fetch` 里把请求固定发往**当前账号自己的站点**（`ownURL`），不会用另一个账号的地址和分组。撞 label 的代价只是模型选择器里少一份重复项。
 - **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。

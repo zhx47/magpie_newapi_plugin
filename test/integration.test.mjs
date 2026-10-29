@@ -596,3 +596,56 @@ test("a Turnstile site is a captcha from its status, before any press", async ()
     await site.close();
   }
 });
+
+// ---- two accounts, one label -----------------------------------------------
+
+test("a second account of one site sends to its own site, not the first's", async () => {
+  // Both sites serve the same group and model names (a real pair of accounts
+  // on one New API host would). Magpie merges their model lists by id, so the
+  // entry's api.url is the first site's; the request must still go to site B.
+  const a = await startNewAPI();
+  const b = await startNewAPI();
+  try {
+    const mdA = runtimeOf(await signIn({ baseURL: a.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    // Same site label by hand, as a user signing the second account in may.
+    const mdB = runtimeOf(await signIn({ baseURL: b.base, accessToken: ACCESS_TOKEN, siteLabel: mdA.siteLabel }, { directory: tmpdir() }));
+    assert.equal(mdA.siteLabel, mdB.siteLabel, "the collision under test");
+
+    // What Magpie would build for the merged entry: site A's base and group.
+    const merged = { id: encodeURIComponent(JSON.stringify(["default", "gpt-4o"])), url: `${a.base}/v1` };
+    const doFetch = makeFetch(async () => ({ type: "api", key: mdB.accessToken, metadata: mdB }));
+    const res = await doFetch(`${merged.url}/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: merged.id, messages: [] }),
+    });
+    assert.equal(res.status, 200);
+    const seen = await res.json();
+    assert.equal(seen.seen.model, "gpt-4o");
+    // B answered, so the request went to B and was signed with B's key.
+    assert.equal(b.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 1);
+    assert.equal(a.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 0);
+    assert.equal(seen.seen.auth, DEFAULT_KEY);
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+test("a group the second account has no key for is not signed with another group's key", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    // vip exists at the site, but this account was given no key for it.
+    delete md.groupKeys.vip;
+    const doFetch = makeFetch(async () => ({ type: "api", key: md.accessToken, metadata: md }));
+    const res = await doFetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: JSON.stringify(["vip", "gpt-5"]) }),
+    });
+    assert.equal(res.status, 503);
+    assert.match((await res.json()).error.message, /vip/);
+    assert.equal(site.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 0);
+  } finally {
+    await site.close();
+  }
+});
