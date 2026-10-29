@@ -1,0 +1,282 @@
+// The OpenCode v1 plugin entry: the provider's declaration and the hooks
+// Magpie calls.
+//
+// One provider, `newapi`, with one account per site. Everything a site has
+// (groups, keys, models, balance, check-in) hangs off its account, so two
+// sites never share state. A model id carries the site and the group, so
+// the same model name in two groups is two models in Magpie.
+
+import { ChallengeError, isAuthError } from "./src/api.mjs";
+import { blockedResult, offResult, pressCheckin } from "./src/checkin.mjs";
+import { makeFetch } from "./src/fetch.mjs";
+import { buildModels, discover } from "./src/models.mjs";
+import { PROVIDER, signIn, validateAccessToken, validateBase } from "./src/signin.mjs";
+import { accountOf, caches, groupKeysOf, runtimeMd } from "./src/state.mjs";
+import { buildUsage } from "./src/usage.mjs";
+
+const pkg = {
+  name: "New API",
+  npm: "@ai-sdk/openai-compatible",
+  api: "",
+};
+
+/** The provider's switches, all boolean (Magpie's auth.options shape). */
+const OPTIONS = [
+  {
+    key: "auto-create-keys",
+    label: "Create missing group keys",
+    description: "Ask the site to create an API token for each group Magpie has no key for.",
+    default: false,
+    confirm: "This creates API tokens named magpie-... on your New API site.",
+  },
+  {
+    key: "expose-all-protocols",
+    label: "List every protocol a model supports",
+    description: "Show a separate model for chat, Responses, Messages and Gemini when the site supports more than one.",
+    default: false,
+  },
+  {
+    key: "prefer-responses",
+    label: "Prefer Responses for GPT-5 and Codex models",
+    description: "Send GPT-5 class models on OpenAI's Responses API when the site offers it.",
+    default: true,
+  },
+  {
+    key: "prefer-anthropic",
+    label: "Prefer Messages for Claude models",
+    description: "Send Claude models on Anthropic's Messages API when the site offers it, keeping thinking and cache control.",
+    default: true,
+  },
+];
+
+/** The methods a user can sign in with. */
+const METHODS = [
+  {
+    type: "api",
+    label: "New API access token",
+    placeholder: "access token, not sk-...",
+    prompts: [
+      {
+        type: "text",
+        key: "baseURL",
+        message: "New API base URL",
+        placeholder: "https://newapi.example.com",
+        validate: validateBase,
+      },
+      {
+        type: "password",
+        key: "accessToken",
+        message: "Access token",
+        placeholder: "the site's access token (not an sk- key)",
+        validate: validateAccessToken,
+      },
+      {
+        type: "text",
+        key: "userId",
+        message: "User id (old New API only; leave empty)",
+        placeholder: "1",
+      },
+      {
+        type: "text",
+        key: "siteLabel",
+        message: "Site label (the model prefix; empty uses the host)",
+        placeholder: "example",
+      },
+      {
+        type: "text",
+        key: "groupFilter",
+        message: "Only these groups (comma separated; empty means all)",
+        placeholder: "default,vip",
+      },
+      {
+        type: "text",
+        key: "groupKeys",
+        message: "Group keys (optional: vip=sk-...; default=sk-...)",
+        placeholder: "vip=sk-...;default=sk-...",
+      },
+      {
+        type: "select",
+        key: "checkin",
+        message: "Daily check-in",
+        options: [
+          { label: "Automatic", value: "auto" },
+          { label: "Off (check in on the site yourself)", value: "off" },
+        ],
+      },
+      {
+        type: "select",
+        key: "autoCreate",
+        message: "Create API tokens on the site for groups without a key?",
+        options: [
+          { label: "No", value: "no" },
+          { label: "Yes", value: "yes" },
+        ],
+      },
+    ],
+    async authorize(inputs) {
+      return signIn(inputs, { directory: pluginDirectory() });
+    },
+  },
+];
+
+// Magpie's config directory, given at load (input.directory). A global
+// rather than a closure value so the method's authorize above can read it.
+let directory = "";
+function pluginDirectory() {
+  return directory;
+}
+
+/** The options as the user set them, read at each call so a change lands without a restart. */
+function optionsOf(input) {
+  const read = typeof input?.magpie?.options === "function" ? input.magpie.options(PROVIDER) : {};
+  // Magpie hands back only keys it kept; a missing one is the declared default.
+  const on = (key) => (typeof read?.[key] === "boolean" ? read[key] : OPTIONS.find((o) => o.key === key)?.default === true);
+  return {
+    autoCreateKeys: on("auto-create-keys"),
+    exposeAllProtocols: on("expose-all-protocols"),
+    preferResponses: on("prefer-responses"),
+    preferAnthropic: on("prefer-anthropic"),
+  };
+}
+
+/** Load the account's groups and models from the site, with the caches in state.mjs. */
+async function listingOf(auth, options, hostModels) {
+  const md = runtimeMd(auth);
+  const groupKeys = groupKeysOf(md);
+  if (!md.baseURL || !Object.keys(groupKeys).length) {
+    return { md, groups: {}, pricing: null, built: { models: {}, perGroup: {} } };
+  }
+  const discovered = await discover({ md, groupKeys });
+  const built = buildModels({
+    md,
+    groups: discovered.groups,
+    pricing: discovered.pricing,
+    options: { ...options, hostModels },
+  });
+  return { md, ...discovered, built };
+}
+
+/** The models hook, shared by the provider declaration. */
+async function modelsFor(provider, auth, options) {
+  if (!auth) return {};
+  const { md, groups, built } = await listingOf(auth, options, provider?.models ?? {});
+  const haveKeys = Object.keys(groupKeysOf(md)).length > 0;
+  // Every key failed, or the site answered nothing: throw so Magpie keeps the
+  // list it had and says why, instead of emptying the picker. A site that
+  // answered but lists only non-chat models is an empty list, not an error.
+  if (haveKeys && !Object.keys(groups).length) {
+    throw new Error(
+      `New API: no models listed for ${md.siteLabel ?? md.baseURL}. ` +
+        "Check the group keys and that the site's /v1/models answers.",
+    );
+  }
+  return built.models;
+}
+
+/** The plugin function Magpie loads. */
+export const NewAPI = async (input) => {
+  if (typeof input?.directory === "string" && input.directory) directory = input.directory;
+
+  const options = () => optionsOf(input);
+
+  return {
+    config: async (cfg) => {
+      cfg.provider ??= {};
+      cfg.provider[PROVIDER] ??= { ...pkg };
+    },
+
+    auth: {
+      provider: PROVIDER,
+      methods: METHODS,
+      options: OPTIONS,
+
+      loader: (getAuth) => ({
+        // A placeholder rather than the account's key: Magpie would otherwise
+        // send the access token to every relay endpoint. fetch replaces it.
+        apiKey: "magpie-newapi",
+        fetch: makeFetch(getAuth),
+      }),
+
+      async usage(getAuth) {
+        const auth = await getAuth();
+        const { base, token } = accountOf(auth);
+        if (!base || !token) return { error: "not signed in", windows: [] };
+        try {
+          return await buildUsage(runtimeMd(auth));
+        } catch (e) {
+          // A balance read is not the account's health: a refused token, a
+          // hidden endpoint or a dropped connection all leave the group keys
+          // able to relay, so never mark the account lapsed here.
+          return { error: describe(e), windows: [], signIn: "kept" };
+        }
+      },
+
+      async checkin(getAuth) {
+        const auth = await getAuth();
+        const { md, base, token } = accountOf(auth);
+        if (!base || !token) return { outcome: "failed", message: "not signed in" };
+        if (md.checkin === "off") return offResult();
+        if (md.checkinBlocked) return blockedResult(md.checkinBlocked);
+
+        let result;
+        try {
+          result = await pressCheckin(runtimeMd(auth));
+        } catch (e) {
+          if (e instanceof ChallengeError) {
+            await markCheckinBlocked(input, auth, e.code);
+            return blockedResult(e.code);
+          }
+          if (isAuthError(e)) {
+            return { outcome: "failed", message: `The site refused the access token: ${describe(e)}` };
+          }
+          return { outcome: "failed", message: describe(e) };
+        }
+        if (result.blocked) {
+          await markCheckinBlocked(input, auth, result.blocked);
+          return { outcome: "captcha", message: result.message };
+        }
+        return result;
+      },
+    },
+
+    provider: {
+      id: PROVIDER,
+      async models(provider, { auth } = {}) {
+        return modelsFor(provider, auth, options());
+      },
+    },
+  };
+};
+
+// OpenCode v1's object form: host.js takes `default.server` alone and does
+// not call every other exported function as a plugin. (Its `servers()`
+// treats each function export as a plugin function, which is why the
+// helpers below are not exported from this entry.)
+export default { id: PROVIDER, server: NewAPI };
+
+/** Remember that the site challenged the check-in, so the next day is one request cheaper. */
+async function markCheckinBlocked(input, auth, kind) {
+  const md = auth?.metadata ?? {};
+  if (!kind || md.checkinBlocked === kind) return;
+  const next = {
+    ...auth,
+    metadata: {
+      ...md,
+      checkinBlocked: kind,
+      checkinBlockedAt: new Date().toISOString(),
+    },
+  };
+  try {
+    await input?.client?.auth?.set?.({ path: { id: PROVIDER }, body: next });
+    caches.usage.clear();
+  } catch {
+    // The result of this run stands; the next run finds it again.
+  }
+}
+
+function describe(e) {
+  const message = String(e?.message ?? e ?? "").trim();
+  return message.length > 300 ? `${message.slice(0, 300)}…` : message || "unknown error";
+}
+
+// Nothing else is exported: see the note on the default export.

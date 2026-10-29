@@ -1,0 +1,30 @@
+{
+  "name": "opencode-newapi-auth",
+  "version": "0.1.0",
+  "description": "OpenCode provider plugin for New API (NewAPI) aggregators: groups, per-group keys, multi-protocol models, balance and daily check-in",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "newapi",
+    "new-api",
+    "one-api",
+    "magpie"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "live": "node scripts/live.mjs",
+    "scan": "node scripts/scan-secrets.mjs"
+  },
+  "magpie": {
+    "maxConcurrency": 8
+  }
+}

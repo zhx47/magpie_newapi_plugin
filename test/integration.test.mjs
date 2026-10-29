@@ -1,0 +1,596 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+
+import { buildModels, discover } from "../src/models.mjs";
+import { makeFetch } from "../src/fetch.mjs";
+import { buildUsage } from "../src/usage.mjs";
+import { pressCheckin } from "../src/checkin.mjs";
+import { signIn, validateAccessToken } from "../src/signin.mjs";
+import { groupKeysOf, readCachedKeys } from "../src/state.mjs";
+import { formatQuota, quotaAsNumber, quotaInfo } from "../src/util.mjs";
+import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
+
+function tmpdir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "newapi-plugin-test-"));
+}
+
+function authOf(result) {
+  assert.equal(result.type, "success", `sign-in failed: ${result.error ?? ""}`);
+  return { type: "api", key: result.key, metadata: result.metadata };
+}
+
+/** Metadata as the internal helpers take it: base, token and user id together. */
+function runtimeOf(result) {
+  const auth = authOf(result);
+  return { ...auth.metadata, accessToken: auth.key };
+}
+
+/** The entry for one group's model, found by id suffix (the site label is the mock's host:port). */
+function entry(models, group, model, suffix = "") {
+  const found = Object.entries(models).find(([id]) => id.endsWith(`/${group}/${model}${suffix}`));
+  assert.ok(found, `no model ${group}/${model}${suffix} among ${Object.keys(models).slice(0, 10).join(", ")}`);
+  return found[1];
+}
+
+function has(models, group, model, suffix = "") {
+  return Object.keys(models).some((id) => id.endsWith(`/${group}/${model}${suffix}`));
+}
+
+test("sign in reveals the keys it may and names the groups it may not", async () => {
+  const site = await startNewAPI();
+  try {
+    const directory = tmpdir();
+    const result = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory });
+    const md = authOf(result).metadata;
+
+    assert.equal(md.baseURL, site.base);
+    assert.match(md.email, /\(alice\)$/);
+    assert.equal(md.email, md.accountId);
+    assert.equal(md.userId, 1);
+    assert.deepEqual(Object.keys(md.groups).sort(), ["default", "svip", "vip"]);
+    assert.deepEqual(md.groupKeys.default, [DEFAULT_KEY]);
+    assert.deepEqual(md.groupKeys.vip, [VIP_KEY]);
+    assert.deepEqual(md.pendingGroups, ["svip"]);
+    assert.equal(md.checkin, "auto");
+    assert.equal(md.status.quotaPerUnit, 500000);
+    assert.equal(md.status.checkin, true);
+
+    const cached = readCachedKeys(directory, site.base, 1, "alice");
+    assert.deepEqual(cached.groupKeys.vip, [VIP_KEY]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("sign in keeps a pasted key when reveal is denied", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    const result = await signIn(
+      {
+        baseURL: site.base,
+        accessToken: ACCESS_TOKEN,
+        groupKeys: "default=sk-pasted-default-1;vip=sk-pasted-vip-2",
+        checkin: "off",
+      },
+      { directory },
+    );
+    const md = authOf(result).metadata;
+    assert.deepEqual(md.groupKeys.default, ["sk-pasted-default-1"]);
+    assert.deepEqual(md.groupKeys.vip, ["sk-pasted-vip-2"]);
+    assert.deepEqual(md.pendingGroups, ["svip"]);
+    assert.equal(md.checkin, "off");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a second sign-in keeps keys the cache holds", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "svip=sk-pasted-svip-3" }, { directory });
+    const second = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory });
+    const md = authOf(second).metadata;
+    // The pasted key survives; the groups the site would not reveal are still missing.
+    assert.deepEqual(md.groupKeys.svip, ["sk-pasted-svip-3"]);
+    assert.deepEqual(md.pendingGroups, ["default", "vip"]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a masked reveal is never taken for a key", async () => {
+  const site = await startNewAPI({ reveal: "masked" });
+  try {
+    const result = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(result).metadata;
+    assert.equal(md.groupKeys.default, undefined);
+    assert.deepEqual(md.pendingGroups, ["default", "svip", "vip"]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a refused access token fails with what to fix", async () => {
+  const site = await startNewAPI();
+  try {
+    const result = await signIn({ baseURL: site.base, accessToken: "wrong-token" }, { directory: tmpdir() });
+    assert.equal(result.type, "failed");
+    assert.match(result.error, /User id/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("an sk- key is refused by the access token prompt", () => {
+  assert.match(validateAccessToken("sk-not-a-token"), /relay API key/);
+  assert.equal(validateAccessToken("an-access-token"), undefined);
+  assert.match(validateAccessToken(""), /access token/);
+});
+
+test("models carry the site, the group and a per-model protocol", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
+
+    // default and vip both serve gpt-4o: two Magpie models, not one.
+    const d4 = entry(models, "default", "gpt-4o");
+    const v4 = entry(models, "vip", "gpt-4o");
+    assert.notEqual(d4.api.id, v4.api.id);
+    assert.equal(d4.api.npm, "@ai-sdk/openai-compatible");
+    assert.equal(d4.api.url, `${site.base}/v1`);
+    assert.equal(entry(models, "vip", "gpt-5").api.npm, "@ai-sdk/openai");
+    assert.equal(entry(models, "vip", "claude-sonnet-4.5").api.npm, "@ai-sdk/anthropic");
+    // Gemini also has a chat endpoint, so chat wins by default.
+    assert.equal(entry(models, "vip", "gemini-2.5-pro").api.npm, "@ai-sdk/openai-compatible");
+    // An embeddings-only model is not a chat model.
+    assert.equal(has(models, "default", "text-embedding-3-small"), false);
+    // svip has no key, so it lists nothing.
+    assert.equal(has(models, "svip", "gpt-5"), false);
+  } finally {
+    await site.close();
+  }
+});
+
+test("exposeAllProtocols lists every protocol a model supports", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const { models } = buildModels({
+      md,
+      groups: discovered.groups,
+      pricing: discovered.pricing,
+      options: { exposeAllProtocols: true },
+    });
+    // The first protocol keeps the bare id; the second gets the suffix.
+    const plain = entry(models, "vip", "gpt-5");
+    const chat = entry(models, "vip", "gpt-5", "@chat");
+    assert.equal(plain.api.npm, "@ai-sdk/openai");
+    assert.equal(chat.api.npm, "@ai-sdk/openai-compatible");
+    assert.equal(plain.api.id, chat.api.id);
+    assert.ok(has(models, "vip", "claude-sonnet-4.5", "@chat"));
+    assert.ok(has(models, "vip", "gemini-2.5-pro", "@chat"));
+  } finally {
+    await site.close();
+  }
+});
+
+test("a closed pricing square still lists models from /v1/models", async () => {
+  const site = await startNewAPI({ pricingClosed: true });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    assert.equal(discovered.pricing, null);
+    const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
+    assert.ok(has(models, "default", "gpt-4o"));
+    assert.ok(has(models, "vip", "claude-sonnet-4.5"));
+    assert.equal(entry(models, "vip", "claude-sonnet-4.5").api.npm, "@ai-sdk/openai-compatible");
+  } finally {
+    await site.close();
+  }
+});
+
+test("fetch picks the group's key, restores the model and signs by endpoint", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+
+    const chat = await doFetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${ACCESS_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: JSON.stringify(["vip", "gpt-4o"]), messages: [] }),
+    });
+    const seenChat = await chat.json();
+    assert.equal(
+      chat.status,
+      200,
+      `keys=${Object.keys(md.groupKeys)} · groups=${Object.keys(md.groups)} · seed=${md.pendingGroups} · body=${JSON.stringify(seenChat)} · reqs=${site.state.requests.map((r) => `${r.method} ${r.path}->${r.status}`).join(",")}`,
+    );
+    assert.equal(seenChat.seen.model, "gpt-4o");
+    assert.equal(seenChat.seen.group, "vip");
+    assert.equal(seenChat.seen.auth, VIP_KEY);
+
+    const messages = await doFetch(`${site.base}/v1/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${ACCESS_TOKEN}` },
+      body: JSON.stringify({ model: JSON.stringify(["vip", "claude-sonnet-4.5"]), messages: [] }),
+    });
+    const seenMessages = await messages.json();
+    assert.equal(seenMessages.seen.model, "claude-sonnet-4.5");
+    assert.equal(seenMessages.seen.group, "vip");
+    const sent = site.state.requests.filter((r) => r.path === "/v1/messages").at(-1);
+    assert.equal(sent.headers["x-api-key"], VIP_KEY);
+    assert.equal(sent.headers.authorization, undefined);
+  } finally {
+    await site.close();
+  }
+});
+
+test("fetch rewrites a Gemini path and signs with x-goog-api-key", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    const id = encodeURIComponent(JSON.stringify(["vip", "gemini-2.5-pro"]));
+    const res = await doFetch(`${site.base}/v1beta/models/${id}:streamGenerateContent?alt=sse`, { method: "POST" });
+    const seen = await res.json();
+    assert.equal(seen.seen.model, "gemini-2.5-pro");
+    assert.equal(seen.seen.group, "vip");
+    const sent = site.state.requests.filter((r) => r.path.includes(":streamGenerateContent")).at(-1);
+    assert.equal(sent.headers["x-goog-api-key"], VIP_KEY);
+  } finally {
+    await site.close();
+  }
+});
+
+test("fetch never sends the access token to a relay endpoint", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    await doFetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${ACCESS_TOKEN}`, "x-goog-api-key": ACCESS_TOKEN },
+      body: JSON.stringify({ model: JSON.stringify(["default", "gpt-4o"]) }),
+    });
+    const sent = site.state.requests.filter((r) => r.path === "/v1/chat/completions").at(-1);
+    assert.equal(sent.headers.authorization, `Bearer ${DEFAULT_KEY}`);
+    assert.equal(sent.headers["x-goog-api-key"], undefined);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a group without a key answers how to fix it without lapsing the account", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    const res = await doFetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: JSON.stringify(["svip", "gpt-5"]) }),
+    });
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get("x-magpie-sign-in"), "kept");
+    const body = await res.json();
+    assert.match(body.error.message, /svip/);
+    assert.match(body.error.message, /paste/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a refused group key tries the group's next key", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    md.groupKeys.vip = ["sk-bad-key-0000", VIP_KEY];
+    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    const res = await doFetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: JSON.stringify(["vip", "gpt-5"]) }),
+    });
+    assert.equal(res.status, 200);
+    const seen = await res.json();
+    assert.equal(seen.seen.auth, VIP_KEY);
+  } finally {
+    await site.close();
+  }
+});
+
+test("usage shows the balance as a wallet and spend as text", async () => {
+  const site = await startNewAPI({ quota: 5_000_000, usedQuota: 1_000_000 });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const usage = await buildUsage(md);
+    const balance = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(balance.balance, 10); // 5,000,000 / 500,000
+    assert.equal(balance.unit, "$");
+    assert.equal(balance.display, "$10.00 left");
+    const used = usage.windows.find((w) => w.name === "Used");
+    assert.equal(used.used, 0);
+    assert.match(used.display, /1,234 requests/);
+    const groups = usage.windows.find((w) => w.name === "Groups");
+    assert.match(groups.display, /vip/);
+    const missing = usage.windows.find((w) => w.name === "Missing keys");
+    assert.match(missing.display, /svip/);
+    // A clean read says nothing about the sign-in, which clears a lapse mark.
+    assert.equal(usage.signIn, undefined);
+  } finally {
+    await site.close();
+  }
+});
+
+test("usage shows raw quota when the site displays tokens", async () => {
+  const site = await startNewAPI({ displayInCurrency: false, quotaDisplayType: "TOKENS" });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const usage = await buildUsage(md);
+    const balance = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(balance.balance, 5_000_000);
+    assert.equal(balance.unit, "quota");
+  } finally {
+    await site.close();
+  }
+});
+
+test("check-in claims once and reports the credit", async () => {
+  const site = await startNewAPI({ checkedInToday: false });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "claimed");
+    assert.equal(result.credit, 0.01); // 5,000 quota / 500,000 per dollar
+    assert.match(result.message, /\+\$0\.0100/);
+    assert.equal(site.state.checkedIn.length, 1);
+  } finally {
+    await site.close();
+  }
+});
+
+test("check-in already done reads as done", async () => {
+  const site = await startNewAPI({ checkedInToday: true });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "done");
+    assert.equal(result.credit, 0.01);
+  } finally {
+    await site.close();
+  }
+});
+
+test("check-in off is inactive and asks the site nothing", async () => {
+  const site = await startNewAPI();
+  try {
+    const { NewAPI } = await import("../index.mjs");
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, checkin: "off" }, { directory: tmpdir() }));
+    const plugin = await NewAPI({ directory: tmpdir(), magpie: { options: () => ({}) } });
+    const result = await plugin.auth.checkin(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    assert.equal(result.outcome, "inactive");
+    assert.match(result.message, /off/);
+    assert.equal(site.state.requests.filter((r) => r.path.includes("checkin")).length, 0);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a Turnstile site is a captcha, and nothing is pressed", async () => {
+  const site = await startNewAPI({ turnstileCheck: true });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const before = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length;
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "captcha");
+    // The site's own switch is the signal; a POST without a token can only fail.
+    assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, before);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a Cloudflare challenge on check-in is a captcha", async () => {
+  const site = await startNewAPI({ challenge: "cf" });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "captcha");
+    assert.equal(result.blocked, "cf");
+    assert.match(result.message, /Cloudflare/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("autoCreate makes a token for the missing group and reveals it", async () => {
+  const site = await startNewAPI();
+  try {
+    const result = await signIn(
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, autoCreate: "yes", groupFilter: "default,svip" },
+      { directory: tmpdir() },
+    );
+    const md = authOf(result).metadata;
+    assert.deepEqual(md.pendingGroups, []);
+    assert.equal(site.state.created.length, 1);
+    assert.equal(site.state.created[0].group, "svip");
+    assert.match(md.groupKeys.svip[0], /^sk-created-/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("groupFilter limits the groups listed and keyed", async () => {
+  const site = await startNewAPI();
+  try {
+    const result = await signIn(
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, groupFilter: "vip", groupKeys: `vip=${VIP_KEY}` },
+      { directory: tmpdir() },
+    );
+    const md = { ...authOf(result).metadata, accessToken: result.key };
+    assert.deepEqual(Object.keys(md.groupKeys), ["vip"]);
+    assert.deepEqual(md.pendingGroups, []);
+    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
+    assert.ok(has(models, "vip", "gpt-5"));
+    assert.equal(has(models, "default", "gpt-4o"), false);
+  } finally {
+    await site.close();
+  }
+});
+
+test("the plugin hook answers check-in with the switch and the block", async () => {
+  const site = await startNewAPI({ challenge: "cf" });
+  try {
+    const { NewAPI } = await import("../index.mjs");
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const saved = [];
+    const plugin = await NewAPI({
+      directory: tmpdir(),
+      magpie: { options: () => ({}) },
+      client: { auth: { set: async ({ body }) => void saved.push(body) } },
+    });
+    const getAuth = async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md });
+
+    const off = await plugin.auth.checkin(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: { ...md, checkin: "off" } }));
+    assert.equal(off.outcome, "inactive");
+
+    const blocked = await plugin.auth.checkin(getAuth);
+    assert.equal(blocked.outcome, "captcha");
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].metadata.checkinBlocked, "cf");
+
+    // Marked now: no request is made.
+    const again = await plugin.auth.checkin(async () => saved[0]);
+    assert.equal(again.outcome, "captcha");
+  } finally {
+    await site.close();
+  }
+});
+
+test("keys never appear in a sign-in result", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const result = await signIn(
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "vip=sk-secret-vip-999" },
+      { directory: tmpdir() },
+    );
+    assert.equal(result.type, "success");
+    // The key is kept in metadata (that is the point), and never in a message.
+    assert.ok(!String(result.error ?? "").includes("sk-secret-vip-999"));
+    const usage = await buildUsage({ ...result.metadata, accessToken: result.key });
+    assert.ok(!JSON.stringify(usage).includes("sk-secret-vip-999"));
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- the shapes a real site (v1.0.0-rc.46) showed --------------------------
+
+test("a legacy-only site is read and pressed on /api/user/checkin", async () => {
+  const site = await startNewAPI({ legacyCheckinOnly: true, checkedInToday: false });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "claimed");
+    // The reward came back in the old shape (data.reward = 3000).
+    assert.equal(result.credit, 0.006);
+    const posts = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin"));
+    assert.deepEqual(posts.map((r) => r.path), ["/api/user/checkin"]);
+    // The next read finds it done, still on the legacy path.
+    const again = await pressCheckin(md);
+    assert.equal(again.outcome, "done");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a legacy-only site with today's check-in is done, not a 404", async () => {
+  const site = await startNewAPI({ legacyCheckinOnly: true, checkedInToday: true });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "done");
+    // The mock's recorded award is 5,000 quota = $0.01.
+    assert.equal(result.credit, 5000 / 500000);
+    assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, 0);
+  } finally {
+    await site.close();
+  }
+});
+
+test("the usage card of a CNY site reads in yuan", async () => {
+  // quota_per_unit 500000, usd_exchange_rate 7.3: the shape a CNY site has.
+  const site = await startNewAPI({ quota: 1_234_567, usedQuota: 765_432, usdExchangeRate: 7.3, quotaDisplayType: "CNY" });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const usage = await buildUsage(md);
+    const balance = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(balance.unit, "¥");
+    assert.equal(balance.display, "¥18.02 left");
+    assert.equal(balance.balance, 18.024678);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a CNY check-in credit is in yuan too", async () => {
+  const site = await startNewAPI({ legacyCheckinOnly: true, usdExchangeRate: 7.3, quotaDisplayType: "CNY" });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "claimed");
+    // 3,000 quota = $0.006 = ¥0.0438; the credit is in the site's unit.
+    assert.equal(result.credit, 0.006 * 7.3);
+    assert.match(result.message, /¥0\.04/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a CNY site shows its own exchange rate", () => {
+  // The real site: quota_display_type CNY, usd_exchange_rate 7.3.
+  const info = quotaInfo({
+    quota_per_unit: 500000,
+    display_in_currency: true,
+    quota_display_type: "CNY",
+    usd_exchange_rate: 7.3,
+  });
+  assert.equal(info.symbol, "¥");
+  assert.equal(info.rate, 7.3);
+  // 1,234,567 quota = 2.469134 USD, × 7.3 = ¥18.02
+  assert.equal(formatQuota(1234567, info), "¥18.02");
+  assert.equal(quotaAsNumber(1234567, info), 18.024678);
+});
+
+test("a USD site ignores the CNY rate", () => {
+  const info = quotaInfo({ quota_per_unit: 500000, display_in_currency: true, quota_display_type: "USD", usd_exchange_rate: 7.3 });
+  assert.equal(info.rate, 1);
+  assert.equal(formatQuota(500000, info), "$1.00");
+});
+
+test("a Turnstile site is a captcha from its status, before any press", async () => {
+  const site = await startNewAPI({ turnstileCheck: true, legacyCheckinOnly: true });
+  try {
+    const auth = authOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    // The status says turnstile_check: true, so the press is skipped entirely.
+    assert.equal(
+      auth.metadata.status.turnstile,
+      true,
+      `status=${JSON.stringify(auth.metadata.status)} · reqs=${site.state.requests.map((r) => `${r.method} ${r.path}->${r.status}`).join(",")}`,
+    );
+    const md = { ...auth.metadata, accessToken: auth.key };
+    const result = await pressCheckin(md);
+    assert.equal(result.outcome, "captcha");
+    assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, 0);
+  } finally {
+    await site.close();
+  }
+});

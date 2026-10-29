@@ -1,0 +1,18 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Local credentials and state: never commit these.
+.env
+.env.*
+!.env.example
+.live/
+newapi-keys.json
+plugin-auth.json
+*.log
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
