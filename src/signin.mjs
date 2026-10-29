@@ -25,13 +25,10 @@ import {
 } from "./api.mjs";
 import {
   cleanLabel,
-  hashKey,
   hostOf,
   isMaskedKey,
   normalizeApiKey,
   normalizeBase,
-  parseGroupFilter,
-  parseGroupKeys,
   sortGroups,
 } from "./util.mjs";
 import { TtlCache, cacheKey, groupsOf, knownAccounts } from "./state.mjs";
@@ -65,11 +62,6 @@ export function tokensByGroup(tokens, defaultGroupName) {
     (out[group] ??= []).push(t);
   }
   return out;
-}
-/** 新建 token 用的名字，便于之后按名字找回来。 */
-function tokenName(label, group, stamp) {
-  const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
-  return `magpie-${cleanLabel(label, "site")}-${safe}-${stamp}`.slice(0, 50);
 }
 
 // 提问是一次调用问一个，每次都要站点分组：没有这层缓存，
@@ -166,14 +158,9 @@ export function keysSoFar(found, inputs, picked) {
     const k = normalizeApiKey(value);
     if (group && k && !isMaskedKey(k)) pasted[group] = k;
   }
-  const legacy = {};
-  for (const [group, value] of Object.entries(parseGroupKeys(inputs?.groupKeys))) {
-    const k = normalizeApiKey(Array.isArray(value) ? value[0] : value);
-    if (k) legacy[group] = k;
-  }
 
   // 后面的来源覆盖前面的：手填的 key 胜过站点给的。
-  for (const src of [fromPick, createdIn(loginKey(inputs, found.base)), pasted, legacy]) {
+  for (const src of [fromPick, createdIn(loginKey(inputs, found.base)), pasted]) {
     for (const [group, key] of Object.entries(src)) {
       if (key) out[group] = key;
     }
@@ -182,11 +169,8 @@ export function keysSoFar(found, inputs, picked) {
 }
 
 /** 站点提供、还缺 key 的分组，按提问顺序。 */
-function pendingGroupsOf(found, inputs, keys) {
-  const filter = parseGroupFilter(inputs?.groupFilter);
-  const names = Object.keys(found.groups ?? {});
-  const wanted = filter.length ? names.filter((g) => filter.includes(g)) : names;
-  return sortGroups(wanted.filter((g) => !keys[g]));
+function pendingGroupsOf(found, keys) {
+  return sortGroups(Object.keys(found.groups ?? {}).filter((g) => !keys[g]));
 }
 
 /**
@@ -226,25 +210,13 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   const found = await survey(inputs, fetchImpl);
   if (found.failed) {
     // 令牌不行：再问一遍，别继续问那些没有令牌根本答不了的问题。
-    return { ...prompt("accessToken"), message: `${found.failed}\nAccess token` };
+    return { ...prompt("accessToken"), message: `${found.failed}\n${t("Access token")}` };
   }
 
   const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
   const keys = keysSoFar(found, inputs, picked);
-  let pending = pendingGroupsOf(found, inputs, keys);
+  let pending = pendingGroupsOf(found, keys);
   const autoCreate = inputs?.autoCreate;
-  const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
-
-  // 只有几个分组的站点不用问过滤；分组多的必须问，
-  // 否则每个分组都是选择器里的一个模型命名空间。
-  if (allGroups > 6 && inputs?.groupFilter === undefined) {
-    return {
-      type: "text",
-      key: "groupFilter",
-      message: `Only some groups? This site has ${allGroups} (comma separated; empty means all)`,
-      placeholder: [...Object.keys(found.groups ?? {})].slice(0, 4).join(","),
-    };
-  }
 
   // 先试创建：站点自己建的 token 不用人打字，
   // 只有它给不出来的才该让人手填。
@@ -254,11 +226,12 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
       type: "select",
       key: "autoCreate",
       message:
-        `${pending.length} group${pending.length === 1 ? "" : "s"} without a key (${names}). ` +
-        "Let the site create one for each?",
+        pending.length === 1
+          ? t("{n} group without a key ({names}). Let the site create one for each?", { n: 1, names })
+          : t("{n} groups without a key ({names}). Let the site create one for each?", { n: pending.length, names }),
       options: [
-        { label: "Yes, create a token for each", value: "yes" },
-        { label: "No, I will paste them", value: "no" },
+        { label: t("Yes, create a token for each"), value: "yes" },
+        { label: t("No, I will paste them"), value: "no" },
       ],
     };
   }
@@ -302,16 +275,16 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
         return {
           type: "password",
           key,
-          message: `API key for group "${forGroup}" — ${verdict.why}`,
-          placeholder: "paste another key, or leave empty to skip this group",
+          message: t('API key for group "{group}" — the site refused it', { group: forGroup }),
+          placeholder: t("paste another key, or leave empty to skip this group"),
         };
       }
 
       return {
         type: "password",
         key: at,
-        message: `API key for group "${group}"`,
-        placeholder: "sk-... (leave empty to skip this group)",
+        message: t('API key for group "{group}"', { group }),
+        placeholder: t("sk-... (leave empty to skip this group)"),
       };
     }
   }
@@ -362,7 +335,7 @@ function prompt(key) {
   return { ...FIRST_PROMPTS[key] };
 }
 
-/** 某个分组手填的 key 存在哪个输入键下。 */
+/** 某个分组手填的 key 存在哪个输入键下。只用于这一次问答，不写进账号。 */
 export function inputKey(group) {
   return `groupkey:${group}`;
 }
@@ -389,18 +362,6 @@ export function resolvePick(inputs, directory) {
   };
 }
 
-/** 在逐个分组的问题里填的 key：分组 → key。 */
-export function pastedKeys(inputs) {
-  const out = {};
-  for (const [key, value] of Object.entries(inputs ?? {})) {
-    if (!key.startsWith("groupkey:")) continue;
-    const group = key.slice("groupkey:".length);
-    const k = normalizeApiKey(value);
-    if (group && k && !isMaskedKey(k)) out[group] = [k];
-  }
-  return out;
-}
-
 /**
  * 完整的登录。`directory` 是 Magpie 的配置目录，
  * 已保存的账号就是从这里读的。
@@ -413,18 +374,9 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
 
   const label = cleanLabel(inputs?.siteLabel, hostOf(base));
   const accountId = `${label} (${self.username || self.id || userId || "user"})`;
-  const filter = parseGroupFilter(inputs?.groupFilter);
   const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
 
   const keys = keysSoFar(found, inputs, picked);
-
-  // 过滤器指明用户要哪些分组；不在其中的 key 一并丢掉，
-  // 账号里只留用户要的。
-  if (filter.length) {
-    for (const group of Object.keys(keys)) {
-      if (!filter.includes(group)) delete keys[group];
-    }
-  }
 
   // 站点认识的分组，加上选中的账号有、但这一轮没看到的
   // （站点的某个接口可能关着）。
@@ -433,7 +385,7 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     ...Object.keys(keys),
     ...Object.keys(picked ? groupsOf(picked.metadata) : {}),
   ]);
-  const siteGroups = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
+  const siteGroups = [...known];
 
   // 没走问答就直接答 yes 的调用方（命令行、服务器）在这里创建。
   const session = loginKey(inputs, base);
@@ -488,7 +440,6 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
       username: self.username || "",
       displayName: self.displayName || "",
       siteLabel: label,
-      groupFilter: filter.join(","),
       groups: groupsMap,
       checkin: inputs?.checkin !== "off" ? "auto" : "off",
       checkinBlocked: "",
@@ -528,7 +479,7 @@ function interviewKeysCleared(metadata, inputs) {
 }
 
 /** 只用于问答、不该留在账号里的键。 */
-const INTERVIEW_KEYS = ["accessToken", "pick", "autoCreate", "groupKeys"];
+const INTERVIEW_KEYS = ["accessToken", "pick", "autoCreate"];
 
 
 function describe(e) {

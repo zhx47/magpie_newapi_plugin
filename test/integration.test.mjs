@@ -104,7 +104,8 @@ test("sign in keeps a pasted key when reveal is denied", async () => {
       {
         baseURL: site.base,
         accessToken: ACCESS_TOKEN,
-        groupKeys: "default=sk-pasted-default-1;vip=sk-pasted-vip-2",
+        "groupkey:default": "sk-pasted-default-1",
+        "groupkey:vip": "sk-pasted-vip-2",
         checkin: "off",
       },
       { directory },
@@ -123,7 +124,7 @@ test("a second sign-in keeps the keys the account had", async () => {
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const directory = tmpdir();
-    const first = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "svip=sk-pasted-svip-3" }, { directory });
+    const first = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, "groupkey:svip": "sk-pasted-svip-3" }, { directory });
     saveAuth(directory, first);
 
     // 选中刚刚保存的那个账号，它的 key 会一并用上。
@@ -450,7 +451,7 @@ test("autoCreate makes a token for the missing group and reveals it", async () =
   const site = await startNewAPI();
   try {
     const result = await signIn(
-      { baseURL: site.base, accessToken: ACCESS_TOKEN, autoCreate: "yes", groupFilter: "default,svip" },
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, autoCreate: "yes" },
       { directory: tmpdir() },
     );
     const md = authOf(result).metadata;
@@ -463,20 +464,26 @@ test("autoCreate makes a token for the missing group and reveals it", async () =
   }
 });
 
-test("groupFilter limits the groups listed and keyed", async () => {
+test("a pasted key lands in the one groups map, and every group is listed", async () => {
   const site = await startNewAPI();
   try {
     const result = await signIn(
-      { baseURL: site.base, accessToken: ACCESS_TOKEN, groupFilter: "vip", groupKeys: `vip=${VIP_KEY}` },
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, "groupkey:vip": VIP_KEY },
       { directory: tmpdir() },
     );
     const md = { ...authOf(result).metadata, accessToken: result.key };
-    assert.deepEqual(keyed(md), ["vip"]);
-    assert.deepEqual(pend(md), []);
+    // 手填的 key 和站点给的 key 存在同一个地方。
+    assert.equal(key(md, "vip"), VIP_KEY);
+    assert.deepEqual(pend(md), ["svip"]);
+    // 问答的答案不会被 Magpie 的 save() 带进账号（它把 undefined 序列化掉）。
+    const saved = JSON.parse(JSON.stringify(md));
+    assert.equal(Object.keys(saved).some((k) => k.startsWith("groupkey:")), false, "the answer is not kept");
+
+    // 没有过滤器：两个有 key 的分组都列出模型。
     const discovered = await discover({ md });
     const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
     assert.ok(has(models, "vip", "gpt-5"));
-    assert.equal(has(models, "default", "gpt-4o"), false);
+    assert.ok(has(models, "default", "gpt-4o"));
   } finally {
     await site.close();
   }
@@ -515,7 +522,7 @@ test("keys never appear in a sign-in result", async () => {
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const result = await signIn(
-      { baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "vip=sk-secret-vip-999" },
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, "groupkey:vip": "sk-secret-vip-999" },
       { directory: tmpdir() },
     );
     assert.equal(result.type, "success");

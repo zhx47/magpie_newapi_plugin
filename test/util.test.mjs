@@ -10,8 +10,6 @@ import {
   joinURL,
   maskSecret,
   normalizeBase,
-  parseGroupFilter,
-  parseGroupKeys,
   quotaAsNumber,
   quotaInfo,
   scrubSecrets,
@@ -47,15 +45,6 @@ test("maskSecret and scrubSecrets keep neighbours readable", () => {
   assert.ok(scrubbed.includes("alice"));
 });
 
-test("parseGroupKeys accepts text and JSON", () => {
-  assert.deepEqual(parseGroupKeys("vip=sk-a;default=sk-b"), { vip: ["sk-a"], default: ["sk-b"] });
-  assert.deepEqual(parseGroupKeys("vip=sk-a\nvip=sk-c"), { vip: ["sk-a", "sk-c"] });
-  assert.deepEqual(parseGroupKeys('{"vip":["sk-a"],"default":"sk-b"}'), { vip: ["sk-a"], default: ["sk-b"] });
-  assert.deepEqual(parseGroupKeys("# comment\n\n=sk-x"), {});
-  // 掩码值不是 key
-  assert.deepEqual(parseGroupKeys("vip=sk-v***0002"), {});
-});
-
 test("isMaskedKey", () => {
   assert.equal(isMaskedKey("sk-v***0002"), true);
   assert.equal(isMaskedKey("sk-v•••0002"), true);
@@ -65,11 +54,6 @@ test("isMaskedKey", () => {
 
 test("sortGroups puts default first", () => {
   assert.deepEqual(sortGroups(["vip", "default", "svip", "vip"]), ["default", "svip", "vip"]);
-});
-
-test("parseGroupFilter", () => {
-  assert.deepEqual(parseGroupFilter("default, vip;svip"), ["default", "vip", "svip"]);
-  assert.deepEqual(parseGroupFilter(""), []);
 });
 
 test("quotaInfo and formatQuota follow the site's display", () => {

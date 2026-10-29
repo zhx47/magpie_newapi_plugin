@@ -67,10 +67,13 @@ const mask = (s) => (typeof s === "string" && s.length > 8 ? `${s.slice(0, 6)}�
 console.log("site        :", md.baseURL, "|", md.status.systemName, md.status.version);
 console.log("account     :", md.accountId);
 console.log("groups      :", Object.keys(md.groups).join(", "));
-for (const [group, keys] of Object.entries(md.groupKeys)) {
-  console.log(`keys ${group.padEnd(8)}: ${keys.length} ·`, keys.map(mask).join(", "));
+for (const [group, info] of Object.entries(md.groups)) {
+  const bits = [info.key ? mask(info.key) : "no key"];
+  if (info.ratio) bits.push(`x${info.ratio}`);
+  if (info.problem) bits.push(info.problem);
+  if (info.tried) bits.push("tried");
+  console.log(`  ${group.padEnd(12)} ${bits.join(" · ")}`);
 }
-console.log("missing     :", md.pendingGroups.length ? md.pendingGroups.join(", ") : "none");
 
 const instance = await NewAPI({
   directory: dir,

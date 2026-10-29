@@ -353,7 +353,7 @@ function chooseProtocols(endpoints, model, settings) {
 > }
 > ```
 >
-> `problem` 是 `refused`（站点拒绝该 key）或 `gone`（站点不再提供该分组）；`tried` 表示建过一次但要不到 key，不再建。`src/sync.mjs` 的 `syncAccount()` 在每次读用量（10 分钟节流，8 秒预算）和每次签到（强制）时运行，只写这个 map：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token。
+> `problem` 是 `refused`（站点拒绝该 key）或 `gone`（站点不再提供该分组）；`tried` 表示建过一次但要不到 key，不再建。手填的 key 也写进同一张表的 `key` 字段——账号里只有这一处存 key。`src/sync.mjs` 的 `syncAccount()` 在每次读用量（10 分钟节流，8 秒预算）和每次签到（强制）时运行，只写这个 map：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token。
 
 **为什么列模型不参与**：Magpie 给 `provider.models` 的超时是 20 秒（`internal/gui/providers.go:2033`），而且它和别的供应商共用一个列表请求。在那里做同步会让一个大站点必然超时（`context deadline exceeded`）。同步只放在有自己预算的钩子里：`auth.usage`（8 秒预算，内部再和 8 秒的请求超时竞争）和 `auth.checkin`（每天一次，强制）。
 
@@ -366,7 +366,7 @@ function chooseProtocols(endpoints, model, settings) {
    - 其他 → 该分组。
 3. 过滤：`status === 1`、`expired_time === -1` 或未过期、`unlimited_quota` 或 `remain_quota > 0`。
 4. 每个分组保留多个 key（按优先级排序），用于轮换/故障切换。
-5. 如果 `/api/user/self/groups` 不可用（403/旧版本），用 token 列表里的 `group` 和 `/api/pricing` 的 `usable_group` 兜底；再不行就用 `groupKeys` 的 key。
+5. 如果 `/api/user/self/groups` 不可用（403/旧版本），用 token 列表里的 `group` 和 `/api/pricing` 的 `usable_group` 兜底；再不行就用账号里已有的 `groups`。
 
 #### 3.5.2 取回完整 key
 
@@ -379,16 +379,17 @@ function chooseProtocols(endpoints, model, settings) {
 
 #### 3.5.3 手动回填
 
-登录 method 增加一个可选 `text` prompt：
+**早期方案（已废弃）** 是一个 `groupKeys: "vip=sk-xxx;default=sk-yyy"` 文本框。分组名和 key 都要手写，容易错位，也不知道到底缺哪个。
+
+现在每个缺 key 的分组各占一问，`ask()` 逐问返回：
 
 ```
-groupKeys: "vip=sk-xxx;default=sk-yyy"
+type: password, key: "groupkey:<group>", message: "API key for group \"vip\""
 ```
 
-- 分隔符：换行、英文逗号、分号都接受；每项按第一个 `=` 分割；空行和 `#` 注释忽略。
-- 也接受 JSON：`{"vip":"sk-xxx","default":"sk-yyy"}`。
-- 回填 key 的 group 标签由用户给出；不强制通过 API 验证（避免登录时 N 个请求），但会在 `provider.models` 里用 `/v1/models` 验证；无效 key 标记为 bad。
-- 如果用户回填的 key 与 token 列表里的某个 token 匹配（无法直接匹配，因为列表是掩码），只按用户标签使用。
+- 标题就是分组名，留空跳过该分组。
+- 填进去的 key 当场用 `/v1/models` 校验；被拒的话同一个分组再问一次，标题里说明原因。
+- 回答以 `groupkey:<group>` 存在 `inputs` 里，只在这次登录内有效：`signIn()` 把它并进 `groups[group].key`，然后把该键置空，Magpie 的 `save()` 就不会把它带进 metadata。
 
 #### 3.5.4 自动创建（可选）
 
@@ -423,12 +424,8 @@ Provider option `autoCreateKeys`（默认 **false**，`confirm` 明确提示会�
 
 #### 3.5.6 存储与重登合并
 
-- **主存储**：账号 `metadata.groupKeys = { "<group>": ["sk-...", ...] }`。`client.auth.set` 可更新。
-- **合并缓存**：`<directory>/newapi-keys.json`，key 为 `<baseURL>|<userId||username>`，内容 `{ groupKeys, updatedAt }`，文件权限 0600。
-  - `authorize` 时先读缓存，和本次发现/回填的 key 合并；
-  - 合并结果写回 metadata 和缓存；
-  - 重登时即使 Magpie 替换了账号 auth，缓存里的旧 key 不会丢。
-  - 缓存不是 source of truth；丢了只会导致需要重新回填，不影响已保存的 metadata。
+- **唯一存储**：账号 `metadata.groups = { "<group>": { ratio, desc, key, problem, tried } }`。`client.auth.set` 可更新。
+- 没有 `metadata.groupKeys`、没有 `newapi-keys.json` 这种旁路缓存：账号自己就是唯一状态。重登时从 `plugin-auth.json` 读回账号，key 就在 `groups` 里。
 - 不要把 key 写进日志、错误消息或用量 `display`。
 
 ### 3.6 请求转发（fetch）
@@ -628,11 +625,11 @@ async function markBlocked(client, auth, md, kind) {
 | 2 | `accessToken` | password | NewAPI 的“系统访问令牌”/PAT；不是 `sk-...` 推理 key。**只问这一次**（方法声明 `keyless: true`，否则 Magpie 会在问题之后再弹一个 API key 框）。 |
 | 3 | `userId` | text | 老版本/AnyRouter 需要；新版本留空。 |
 | 4 | `siteLabel` | text | 模型命名空间前缀；默认 host。 |
-| 5 | `groupFilter` | text | **仅在站点有 7 个以上分组时**才问。 |
-| 6 | `autoCreate` | select | 有分组缺 key 时先问是否让站点创建。选 Yes 就建 token 并自动 reveal。 |
-| 7 | `createdKeys` | select | 创建步骤的结果（JSON），一次问完；选它即继续。 |
-| 8… | `groupkey:<group>` | password | 只有创建不出来（或第 6 步选 No）才问，每个分组一个输入框。已读到或刚建好的 key 不再问。 |
-| 9 | `checkin` | select | `Auto`（默认）/ `Off`。 |
+| 5 | `autoCreate` | select | 有分组缺 key 时先问是否让站点创建。选 Yes 就建 token 并自动 reveal，建好直接进下一问。 |
+| 6… | `groupkey:<group>` | password | 只有创建不出来（或第 5 步选 No）才问，每个分组一个输入框。已读到或刚建好的 key 不再问。 |
+| 7 | `checkin` | select | `Auto`（默认）/ `Off`。 |
+
+没有 `groupFilter`，也没有 `createdKeys`：分组全收（分组决定模型 ID），创建结果由 `src/session.mjs` 的内存会话记录，问完就丢。
 
 顺序是先创建、后手填：站点能给的 key 不让人手打。
 
@@ -659,6 +656,21 @@ async function markBlocked(client, auth, md, kind) {
 ---
 
 ## 4. 插件接口契约（代码骨架）
+
+> **这一节是最初的设计骨架，已被实现取代；以 `index.mjs` 和 `src/` 为准。**
+>
+> 骨架和实现之间已知的差别（读代码时不必回头找）：
+>
+> | 骨架里 | 现在 |
+> | --- | --- |
+> | 静态 `prompts` 列表 + `groupFilter` + `groupKeys` 文本框 | `ask(inputs)` 动态提问，每个缺 key 的分组一问 |
+> | `metadata.groups` 存倍率、`metadata.groupKeys` 存 key 数组 | 一张 `metadata.groups`：`{ ratio, desc, key, problem, tried }` |
+> | `<directory>/newapi-keys.json` 缓存 | 没有旁路缓存，账号自己就是唯一状态（`src/state.mjs`） |
+> | `pendingGroups`、`keyProblems`、`createdKeys` | 由 `groups` 的 `key`/`problem`/`tried` 表达；创建记录只在 `src/session.mjs` 的内存里 |
+> | `modelEntry` 用 `provider: { npm, api }` | `api: { id, url, npm }`（OpenCode Model 的写法） |
+> | 在 models 里同步分组、校验 key | `provider.models` 纯读；同步只在 `auth.usage` / `auth.checkin` |
+>
+> 骨架里的注释和数据形状说明了「为什么这么设计」，这部分仍然有效。
 
 ### 4.1 package.json
 
@@ -943,7 +955,6 @@ function modelEntry({ catalogId, md, group, model, proto, ratio, baseModel }) {
 
 - 只保留至少有一个聊天端点（`openai`/`openai_response`/`anthropic`/`gemini`）的模型；纯 `embeddings`/`image_generation`/`video`/`rerank` 跳过。
 - 跳过 `status: deprecated` 的模型（`/api/pricing` 已过滤；`/v1/models` 不会给）。
-- 如果 `groupFilter` 登录提示给了过滤列表，只列这些分组。
 
 **性能**：
 
@@ -1087,11 +1098,11 @@ async function readUsage(getAuth) {
     {
       name: "Groups",
       used: 0,
-      display: Object.keys(md.groups ?? {}).join(", ") || Object.keys(md.groupKeys ?? {}).join(", "),
+      display: Object.keys(md.groups ?? {}).join(", "),
     },
   ];
 
-  if (md.pendingGroups?.length) {
+  if (groupsMissing(md).length) {
     windows.push({
       name: "Missing keys",
       used: 0,
@@ -1132,14 +1143,14 @@ async function readUsage(getAuth) {
 ### 5.1 登录（authorize）
 
 ```
-用户填 baseURL/accessToken/userId/siteLabel/groupFilter/groupKeys
+用户填 baseURL/accessToken/userId/siteLabel，然后按需回答创建/逐个分组回填
   → GET /api/status                      （缓存，拿 quota_per_unit/checkin/turnstile）
   → GET /api/user/self                   （校验 token；拿 id/username/group/quota）
   → GET /api/user/self/groups            （分组 + ratio/desc；失败不阻塞）
   → GET /api/pricing                     （模型 + enable_groups + endpoints；失败不阻塞）
   → GET /api/token/?p=0&page_size=100    （token 列表，key 掩码）
   → POST /api/token/batch/keys / :id/key （取完整 key；失败不阻塞）
-  → 合并：缓存旧 key + reveal key + 手动 groupKeys
+  → 合并：站点 reveal 的 key + 本次手填的 key + 选中账号原有的 key
   → 可选：autoCreateKeys 对缺失分组创建 token + reveal
   → 至少有一个可用 key？否 → failed（提示回填/自动创建）
   → 写缓存；返回 success + metadata
@@ -1151,7 +1162,7 @@ async function readUsage(getAuth) {
 ### 5.2 模型刷新（provider.models）
 
 ```
-读 metadata（baseURL/siteLabel/groupKeys/groups）
+读 metadata（baseURL/siteLabel/groups）
   → /api/pricing（缓存 60s）→ model→{groups,endpoints}
   → 对每个有 key 的分组：GET /v1/models（缓存 60s；该 key 的权威列表）
   → 过滤非聊天端点 / 已禁用
@@ -1186,7 +1197,7 @@ checkin: GET /api/user/self/checkin → 已签？done
 | 能力 | 新版本 | 旧版本/变体 | 插件策略 |
 | --- | --- | --- | --- |
 | 用户信息 | `GET /api/user/self` | 同 | 主路径；401 时提示 `New-Api-User`。 |
-| 分组 | `/api/user/self/groups` | `/api/user/groups`、`/api/user_group_map` | 依次尝试；都失败则从 `groupKeys` 推断。 |
+| 分组 | `/api/user/self/groups` | `/api/user/groups`、`/api/user_group_map` | 依次尝试；都失败则用账号里已有的 `groups` 和 token 的 `group` 字段。 |
 | 模型 | `/api/pricing` + `/v1/models` | `/api/user/models?group=` | pricing 失败时用 user/models；再失败用每 key `/v1/models`。 |
 | Token 列表 | `/api/token/?p=0&page_size=100` | `?page=1&size=100` 等 | 同时接受 `p`/`page`/`size`/`page_size`；解析 `data.items` 或 `data` 数组。 |
 | 完整 key | `batch/keys` / `:id/key` | 无 | 失败 → 手动回填。 |
@@ -1363,7 +1374,7 @@ m accounts checkin
 4. **PAT scope**：目标站点用旧 access token 还是 PAT；403 时要给用户明确的 scope 提示。
 5. **`New-Api-User`**：目标站点/ fork 是否必须；可选 prompt 是否足够。
 6. **签到时区**：站点服务器时区与北京日的偏差；v1 不返回 `until`，可能在北京日边界重复/漏签一次。实站 `v1.0.0-rc.46` 的签到日就是服务器本地日期。
-7. **模型规模**：大站点（数千模型 × 多分组）的列表体积/刷新耗时；需要 `groupFilter` 过滤和缓存。
+7. **模型规模**：大站点（数千模型 × 多分组）的列表体积/刷新耗时；靠缓存和分层回退（每 key `/v1/models` → 账号级 `/api/user/models`）撑住，不另设过滤器。
 8. **图片/推理能力元数据**：NewAPI 不给 context/vision/reasoning；依赖 models.dev 或用户覆盖。
 
 ### 10.3 明确不做
@@ -1435,7 +1446,8 @@ magpie_newapi_plugin/
     fetch.mjs            # 分组选 key、model 还原、认证头、流式转发
     usage.mjs            # 余额/已用/分组/缺 key/签到状态
     checkin.mjs          # 签到、开关、CF/Turnstile 检测
-    state.mjs            # 缓存、key 轮换、newapi-keys.json
+    state.mjs            # 分组表、缓存、按分组取 key
+    session.mjs          # 一次登录的中间状态（只在内存）
   test/
     util.test.mjs
     protocols.test.mjs
@@ -1461,8 +1473,8 @@ node -e "import('./index.mjs').then(m => console.log(Object.keys(m.default)))"
 - Chat / Responses / Messages / Gemini 四种协议按模型选择，可选多协议变体；
 - `/api/pricing` 关闭时回退 `/v1/models` 与 `/api/user/models`；
 - 分组 key：list → batch/keys → 单 key reveal；掩码/拒绝时手动回填；
-- `newapi-keys.json` 合并缓存，重登不丢手动 key；
-- 同组多 key 轮换，坏 key 只影响该分组，`X-Magpie-Sign-In: kept`；
+- 手填的 key 与站点给的 key 存在同一张 `groups` 表里，重登不丢；
+- 坏 key 只影响该分组，`X-Magpie-Sign-In: kept`，其余分组照常；
 - 余额（`quota_per_unit`/货币/token 显示）与用量文本窗口；
 - 签到：`claimed`/`done`/`inactive`/`captcha`/`failed`、旧路径 fallback；
 - 签到开关（登录时 `Auto`/`Off`）、CF/Turnstile 自动检测与 `checkinBlocked` 标记、不绕过验证；

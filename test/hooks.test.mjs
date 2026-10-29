@@ -118,12 +118,12 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     const directory = tmpdir();
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    // 先问创建：答 no 之后才逐个分组问。
-    const askNoCreate = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "", groupFilter: "default,vip" };
+    // 先问创建：答 no 之后才逐个分组问。三个分组都没有 key。
+    const askNoCreate = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "" };
     const offer = await ask(askNoCreate);
     assert.equal(offer.key, "autoCreate", "the site is offered the chance to create keys first");
-    assert.match(offer.message, /2 groups without a key/);
-    assert.match(offer.message, /default, vip/);
+    assert.match(offer.message, /3 groups without a key/);
+    assert.match(offer.message, /default, svip, vip/);
     const head = { ...askNoCreate, autoCreate: "no" };
 
     const q1 = await ask(head);
@@ -140,12 +140,14 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     const q2 = await ask({ ...head, [q1.key]: DEFAULT_KEY });
     assert.match(q2.key, /^groupkey:/);
     assert.notEqual(q2.key, q1.key);
-    assert.match(q2.message, /"vip"/);
+    assert.match(q2.message, /"svip"/);
 
-    // 两个都答完：接着问签到开关，那是最后一问。
-    const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY };
-    const q3 = await ask(answered);
-    assert.equal(q3.key, "checkin");
+    // 三个都答完：接着问签到开关，那是最后一问。
+    const q3 = await ask({ ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY });
+    assert.match(q3.message, /"vip"/);
+    const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY, [q3.key]: VIP_KEY };
+    const done = await ask(answered);
+    assert.equal(done.key, "checkin");
     assert.equal(await ask({ ...answered, checkin: "auto" }), null);
   } finally {
     await site.close();
@@ -458,7 +460,7 @@ test("a new group at the site reaches an account signed in before it", async () 
     // 一次用量读取就会带出来：同步读站点的分组和 token 列表，
     // 再把账号写回。这里故意不走列举——Magpie 给一个供应商的模型钩子
     // 一共 20 秒，还和其他供应商共用。
-    await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: { ...auth.metadata, groupFilter: "" } }));
+    await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: auth.metadata }));
 
     const after = saved.at(-1);
     assert.ok(after, "the account's metadata was written back");
@@ -471,7 +473,7 @@ test("a new group at the site reaches an account signed in before it", async () 
 });
 
 test("a key the site refuses is reported as refused, not as working", async () => {
-  const { site, instance, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupKeys: "default=sk-revoked-key" } });
+  const { site, instance, auth } = await setup({ site: { reveal: "deny" }, inputs: { "groupkey:default": "sk-revoked-key" } });
   try {
     // 列举会用 /v1/models 校验每个 key；这一个被拒了。
     await instance.provider.models({ models: {} }, { auth }).catch(() => {});
@@ -498,14 +500,14 @@ test("the check-in reads the groups before it presses, once a day", async () => 
 });
 
 test("autoCreate fills a group that appeared after sign-in", async () => {
-  const { site, auth, saved } = await setup({ site: { reveal: "allow" }, inputs: { groupFilter: "default" } });
+  const { site, auth, saved } = await setup({ site: { reveal: "allow" }, inputs: {} });
   try {
     // 管理员新加的分组，本身没有 token。
     site.set({
       groups: { ...site.state.groups, newish: { ratio: 0.9, desc: "new" } },
       models: { ...site.state.models, newish: ["gpt-4o"] },
     });
-    const md = { ...auth.metadata, groupFilter: "" };
+    const md = auth.metadata;
     const withAuto = await NewAPI({
       directory: tmpdir(),
       client: { auth: { set: async ({ body }) => void saved.push(body) } },
@@ -590,7 +592,7 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     const directory = tmpdir();
     // 第一次登录：default 和 vip 手填，svip 跳过。
     const first = await signIn(
-      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", groupKeys: "default=sk-first-default;vip=sk-first-vip" },
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", "groupkey:default": "sk-first-default", "groupkey:vip": "sk-first-vip" },
       { directory },
     );
     assert.equal(first.type, "success");
@@ -638,7 +640,6 @@ test("letting the site create keys asks nothing by hand", async () => {
       accessToken: ACCESS_TOKEN,
       userId: "",
       siteLabel: "",
-      groupFilter: "default,vip,svip",
       autoCreate: "yes",
     };
     // 创建发生在提问里，且只发生一次；建好之后不再问任何分组。
@@ -664,7 +665,7 @@ test("an account already on disk is offered first, and its token reused", async 
   try {
     const directory = tmpdir();
     const first = await signIn(
-      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", groupKeys: "default=sk-a;vip=sk-b" },
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", "groupkey:default": "sk-a", "groupkey:vip": "sk-b" },
       { directory },
     );
     assert.equal(first.type, "success");
@@ -721,7 +722,7 @@ test("a new site is still one of the choices", async () => {
 test("a group whose token cannot be revealed gets no second token", async () => {
   // 站点会建 token，但不会交出它的 key。修好之前每次同步都会再建一个：
   // 一个分组堆出一百多个 token。
-  const { site, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupFilter: "default" } });
+  const { site, auth } = await setup({ site: { reveal: "deny" }, inputs: {} });
   try {
     site.set({
       groups: { ...site.state.groups, stuck: { ratio: 0.5, desc: "stuck" } },
@@ -734,7 +735,7 @@ test("a group whose token cannot be revealed gets no second token", async () => 
       client: { auth: { set: async ({ body }) => void saved.push(body) } },
       magpie: { options: () => ({ "auto-create-keys": true }) },
     });
-    const mdBase = { ...auth.metadata, groupFilter: "" };
+    const mdBase = auth.metadata;
 
     // 跑三轮，相当于三天；每轮都强制同步。
     for (let day = 0; day < 3; day++) {
@@ -756,7 +757,7 @@ test("a group that already has a token is reused, not duplicated", async () => {
   const site = await startNewAPI({ reveal: "allow" });
   try {
     const dir = tmpdir();
-    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupFilter: "default" }, { directory: dir });
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: dir });
     const auth = { type: "api", key: signed.key, metadata: signed.metadata };
     // 管理员自己加了个分组，也自己给它建了 token。
     site.set({
@@ -771,7 +772,7 @@ test("a group that already has a token is reused, not duplicated", async () => {
       client: { auth: { set: async () => {} } },
       magpie: { options: () => ({ "auto-create-keys": true }) },
     });
-    const md = { ...auth.metadata, groupFilter: "" };
+    const md = auth.metadata;
     await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: md }));
 
     // svip 完全没有 token，所以给它建一个；`added` 已经有了，

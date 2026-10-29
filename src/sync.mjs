@@ -24,7 +24,7 @@ import {
   revealTokenKeys,
   tokenUsable,
 } from "./api.mjs";
-import { caches, cacheKey, groupFilterOf, groupsOf, sortGroups } from "./state.mjs";
+import { caches, cacheKey, groupsOf, sortGroups } from "./state.mjs";
 import { cleanLabel, normalizeApiKey } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
@@ -205,11 +205,9 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
   }
 
   const siteNames = siteGroups ? Object.keys(siteGroups) : Object.keys(before);
-  const filter = groupFilterOf(md);
-  const wanted = filter.length ? siteNames.filter((g) => filter.includes(g)) : siteNames;
 
   // 没有 key 的分组：先看站点已有的 token，允许创建时再建新的。
-  let needKeys = sortGroups(wanted.filter((g) => !next[g]?.key && !next[g]?.tried));
+  let needKeys = sortGroups(siteNames.filter((g) => !next[g]?.key && !next[g]?.tried));
   if (needKeys.length) {
     const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }))) ?? [];
     const found = await keysFromTokens({ base, token, userId, groups: needKeys, tokens, fetchImpl });

@@ -12,7 +12,7 @@
 import { chooseProtocols, isChatEndpoint, labelOf, protocolSuffix, wireId } from "./protocols.mjs";
 import { cacheKey, caches, groupsOf } from "./state.mjs";
 import { getPricing, getStatus, listModelsForKey, listUserModels } from "./api.mjs";
-import { parseGroupFilter, sortGroups } from "./util.mjs";
+import { sortGroups } from "./util.mjs";
 
 const NPM = {
   chat: "@ai-sdk/openai-compatible",
@@ -111,13 +111,10 @@ export async function discover({ md, fetchImpl, signal }) {
   );
 
   const groups = {};
-  const wanted = parseGroupFilter(md.groupFilter);
   const groupsMap = groupsOf(md);
   // 只有持有可用 key 的分组才能用 key 列模型；没有 key 的由下面的
   // 账号级列表补上。
-  const names = Object.keys(groupsMap).filter(
-    (g) => (!wanted.length || wanted.includes(g)) && groupsMap[g].key && !groupsMap[g].problem,
-  );
+  const names = Object.keys(groupsMap).filter((g) => groupsMap[g].key && !groupsMap[g].problem);
 
   await Promise.all(
     names.map(async (group) => {

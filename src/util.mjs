@@ -92,59 +92,6 @@ export function isMaskedKey(value) {
   return s.includes("*") || s.includes("•");
 }
 
-/** 把 "vip=sk-1;default=sk-2"（或换行、逗号、JSON）解析成 { 分组: [key] }。 */
-export function parseGroupKeys(input) {
-  const out = {};
-  const raw = String(input ?? "").trim();
-  if (!raw) return out;
-  const add = (group, key) => {
-    const g = normalizeGroupName(group);
-    const k = normalizeApiKey(key);
-    // 掩码是站点列表的显示形式，不能当 key 用。
-    if (!g || !k || isMaskedKey(k)) return;
-    (out[g] ??= []).push(k);
-  };
-  if (raw.startsWith("{")) {
-    try {
-      const j = JSON.parse(raw);
-      for (const [group, value] of Object.entries(j ?? {})) {
-        if (Array.isArray(value)) for (const v of value) add(group, v);
-        else add(group, value);
-      }
-      return dedupeGroups(out);
-    } catch {
-      // 解析失败就退回文本形式
-    }
-  }
-  for (const line of raw.split(/[\n;,]+/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const at = trimmed.indexOf("=");
-    if (at < 0) continue;
-    add(trimmed.slice(0, at), trimmed.slice(at + 1));
-  }
-  return dedupeGroups(out);
-}
-
-export function normalizeGroupName(input) {
-  return String(input ?? "").trim();
-}
-
-function dedupeGroups(groups) {
-  const out = {};
-  for (const [group, keys] of Object.entries(groups)) {
-    const seen = new Set();
-    const list = [];
-    for (const key of keys) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-      list.push(key);
-    }
-    if (list.length) out[group] = list;
-  }
-  return out;
-}
-
 /** 分组名按稳定顺序：default 在前，其余按字母。 */
 export function sortGroups(names) {
   return [...new Set(names.filter(Boolean))].sort((a, b) => {
@@ -152,14 +99,6 @@ export function sortGroups(names) {
     if (b === "default") return 1;
     return a.localeCompare(b);
   });
-}
-
-/** 解析「只同步这些分组」的回答（逗号分隔）。空表示全部。 */
-export function parseGroupFilter(input) {
-  return String(input ?? "")
-    .split(/[\s,;]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 /**

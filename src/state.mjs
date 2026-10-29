@@ -152,10 +152,8 @@ export function usable(md, group) {
 
 /** 站点提供、但还没有 key 的分组，按稳定顺序。 */
 export function groupsMissing(md) {
-  const filter = groupFilterOf(md);
   return sortGroups(
     Object.entries(groupsOf(md))
-      .filter(([name, g]) => !filter.length || filter.includes(name))
       .filter(([, g]) => !g.key && !g.tried)
       .map(([name]) => name),
   );
@@ -163,20 +161,11 @@ export function groupsMissing(md) {
 
 /** 所有需要用户处理的分组：没 key、key 被拒、或分组已消失。 */
 export function groupsNeedingAttention(md) {
-  const filter = groupFilterOf(md);
   return sortGroups(
     Object.entries(groupsOf(md))
-      .filter(([name, g]) => (!filter.length || filter.includes(name)) && g.problem)
+      .filter(([, g]) => Boolean(g.problem))
       .map(([name]) => name),
   );
-}
-
-/** 用户在登录时设的分组过滤。 */
-export function groupFilterOf(md) {
-  return String(md?.groupFilter ?? "")
-    .split(/[\s,;]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 /** default 在前，其余按字母（实现只有 util.mjs 里那一份）。 */

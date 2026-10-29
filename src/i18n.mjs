@@ -55,12 +55,6 @@ const STRINGS = {
     ja: "サイト名（モデルの接頭辞。空欄ならホスト名）",
     de: "Seitenname (Präfix der Modelle; leer = Hostname)",
   },
-  "Only some groups? This site has {n} (comma separated; empty means all)": {
-    zh: "只同步部分分组？这个站点有 {n} 个（逗号分隔，留空表示全部）",
-    "zh-TW": "只同步部分分組？這個站點有 {n} 個（逗號分隔，留空表示全部）",
-    ja: "一部のグループだけ？このサイトには {n} 個あります（カンマ区切り、空欄ならすべて）",
-    de: "Nur einige Gruppen? Diese Seite hat {n} (kommagetrennt; leer = alle)",
-  },
   "{n} group without a key ({names}). Let the site create one for each?": {
     zh: "{n} 个分组没有 key（{names}）。让站点为每个分组各创建一个吗？",
     "zh-TW": "{n} 個分組沒有 key（{names}）。讓站點為每個分組各建立一個嗎？",
@@ -85,13 +79,13 @@ const STRINGS = {
     ja: "いいえ、自分で入力します",
     de: "Nein, ich füge sie selbst ein",
   },
-  "API key for group \"{group}\"": {
+  'API key for group "{group}"': {
     zh: "分组「{group}」的 API key",
     "zh-TW": "分組「{group}」的 API key",
     ja: "グループ「{group}」の API key",
     de: "API-Schlüssel für Gruppe „{group}“",
   },
-  "API key for group \"{group}\" — the site refused it": {
+  'API key for group "{group}" — the site refused it': {
     zh: "分组「{group}」的 API key —— 站点拒绝了它",
     "zh-TW": "分組「{group}」的 API key —— 站點拒絕了它",
     ja: "グループ「{group}」の API key — サイトが拒否しました",
@@ -108,42 +102,6 @@ const STRINGS = {
     "zh-TW": "換一個 key，或留空跳過這個分組",
     ja: "別の key を入力、または空欄でこのグループを飛ばす",
     de: "Anderen Schlüssel einfügen oder leer lassen, um die Gruppe zu überspringen",
-  },
-  "Created a key for {groups}.": {
-    zh: "已为 {groups} 创建了 key。",
-    "zh-TW": "已為 {groups} 建立了 key。",
-    ja: "{groups} の key を作成しました。",
-    de: "Schlüssel für {groups} erstellt.",
-  },
-  "The site created no key.": {
-    zh: "站点没有创建出 key。",
-    "zh-TW": "站點沒有建立出 key。",
-    ja: "サイトは key を作成しませんでした。",
-    de: "Die Seite hat keinen Schlüssel erstellt.",
-  },
-  "{groups} still needs one pasted by hand: the site would not give it up.": {
-    zh: "{groups} 仍需手动填入：站点不肯交出它的 key。",
-    "zh-TW": "{groups} 仍需手動填入：站點不肯交出它的 key。",
-    ja: "{groups} は手入力が必要です。サイトが key を渡しませんでした。",
-    de: "{groups} braucht weiterhin einen von Hand: die Seite gibt ihn nicht heraus.",
-  },
-  "{groups} still need one pasted by hand: the site would not give it up.": {
-    zh: "{groups} 仍需手动填入：站点不肯交出它们的 key。",
-    "zh-TW": "{groups} 仍需手動填入：站點不肯交出它們的 key。",
-    ja: "{groups} は手入力が必要です。サイトが key を渡しませんでした。",
-    de: "{groups} brauchen weiterhin einen von Hand: die Seite gibt ihn nicht heraus.",
-  },
-  "Paste them": {
-    zh: "去填写",
-    "zh-TW": "去填寫",
-    ja: "入力する",
-    de: "Einfügen",
-  },
-  "Continue": {
-    zh: "继续",
-    "zh-TW": "繼續",
-    ja: "続ける",
-    de: "Weiter",
   },
   "Daily check-in": {
     zh: "每日签到",
@@ -162,12 +120,6 @@ const STRINGS = {
     "zh-TW": "自動",
     ja: "自動",
     de: "Automatisch",
-  },
-  "Leave empty to use the saved token": {
-    zh: "留空则使用已保存的令牌",
-    "zh-TW": "留空則使用已儲存的權杖",
-    ja: "空欄なら保存済みのトークンを使用",
-    de: "Leer lassen, um das gespeicherte Token zu verwenden",
   },
 
   // ---- 登录校验 ----

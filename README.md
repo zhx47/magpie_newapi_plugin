@@ -26,14 +26,15 @@ magpie plugin login newapi
 | 2 | Access token | 站点「个人设置 → 访问令牌」里的 token。**不是** `sk-...` 推理 key；填了 `sk-` 会被提示改写。**这是唯一一次要求填 token**。 |
 | 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
 | 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
-| 5 | Group filter | 只在站点有 **7 个以上分组**时才问；更少就不打扰。 |
-| 6 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**；建好之后不再多问一次「要继续吗」，直接问仍然缺的那些。 |
-| 7 | **每个仍然缺 key 的分组一个输入框** | 只有站点建不出来（或第 6 步选了 No）才会问。标题直接写 `API key for group "vip"`，一次填一个；留空跳过。已经能从站点读到、或刚创建的 key 不会再问。 |
-| 8 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
+| 5 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**；建好之后不再多问一次「要继续吗」，直接问仍然缺的那些。 |
+| 6 | **每个仍然缺 key 的分组一个输入框** | 只有站点建不出来（或第 5 步选了 No）才会问。标题直接写 `API key for group "vip"`，一次填一个；留空跳过。已经能从站点读到、或刚创建的 key 不会再问。 |
+| 7 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
+
+没有「只同步部分分组」的过滤器：站点的分组都进账号，因为分组本身就决定模型 ID（`<站点>/<分组>/<模型>`），漏一个就少一批模型。想少看几个，在 Magpie 的模型选择器里筛。
 
 顺序是**先让站点创建，创建不出来才要人填**——站点能给的 key 不该让人手打一遍。
 
-为什么不再用一行文本框拼 `vip=sk-...;default=sk-...`：分组名和 key 都要手写，容易错位，而且不知道到底缺哪个。现在每个分组一个字段，标题就是分组名。
+手填的 key 和站点给的 key 落在**同一个地方**：`groups.<分组>.key`。没有第二个字段、也没有旁路文件；问答用的 `groupkey:<分组>` 只在这次登录里存在，登录成功后就不写进账号了。
 
 **补 key 不需要重新登录也可以**：再次运行 `magpie plugin login newapi`，已保存的 key 从缓存读回，只会问仍然缺的那些分组。
 
@@ -105,8 +106,8 @@ newapi/<siteLabel>/<group>/<model>
 3. 用 `/v1/models` 校验现有的每个 key，被拒的记录成 `refused`；
 4. 若打开了 `auto-create-keys`，为仍缺 key 的分组创建 token——**只在站点确实没有该组的 token 时才建**：
    - 站点已有该组的 token → 只 reveal，不新建；
-   - 建了但 key 读不出来 → 记进 `createAttempted`，**下次不会再建**，等你自己填；
-   - 建过的分组在拿到 key 之后自动从 `createAttempted` 里清掉。
+   - 建了但 key 读不出来 → 记 `tried: true`，**下次不会再建**，等你自己填；
+   - 建过的分组在拿到 key 之后 `tried` 自动去掉。
 
 结果写回账号的 metadata，所以**不需要重新登录**就能看到新分组。
 
@@ -116,8 +117,8 @@ newapi/<siteLabel>/<group>/<model>
 
 1. 读 `/api/token/` 的 token 列表（站点返回的 key 是掩码）；
 2. 用 `/api/token/batch/keys` 或 `/api/token/:id/key` 取回完整 key；
-3. 取不到就保留你逐个输入的 key，并用 `<Magpie 配置目录>/newapi-keys.json` 缓存，重登不会丢；
-4. 仍缺 key 的分组会出现在用量卡片的 **Missing keys** 里，提示你重新登录补上。
+3. 取不到就保留你逐个输入的 key（同样写进 `groups`），重登时从已保存的账号读回来；
+4. 仍缺 key 的分组会出现在用量卡片的 **Group keys** 一行里，提示你重新登录补上。
 
 补 key 的流程：`magpie plugin login newapi` → **在账号列表里点那个站点**（不用再输 access token）→ 先问要不要让站点自动建 key → 建不出来的才逐个手填。
 
@@ -125,14 +126,12 @@ newapi/<siteLabel>/<group>/<model>
 
 站点不允许读取 key（403 / 安全验证）时，手动回填是唯一的办法；插件不会尝试绕过。
 
-同一分组可以有多个 key，按顺序轮换，一个被拒（401/403/429）会试下一个。坏 key 只影响该分组，不会把整个站点账号标记为失效。
-
 ## 余额与签到
 
 - 余额：`/api/user/self` 的 `quota`，按 `/api/status` 的 `quota_per_unit` 换算（默认 500000 quota = $1）。站点关闭货币显示时按原始 quota 显示。
-- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Missing keys / Refused keys」是纯文本行，不会画进度条，也不会显示 `0%`。
+- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Group keys」是纯文本行，不会画进度条，也不会显示 `0%`。
   （Magpie 把带 `used` 的窗口当比例；这些行不发送 `used`，所以不会被误画成 0%。）
-- **Group keys** 一行列出两种需要处理的分组：`no key: svip`（完全没有 key）和 `vip (refused)`（key 被站点拒绝）。两者都提示重新登录补上。
+- **Group keys** 一行列出两种需要处理的分组：`no key: svip`（完全没有 key）和 `refused: vip`（key 被站点拒绝）。两者都提示重新登录补上。
 - 签到：`/api/user/self/checkin`，旧版本回退 `/api/user/checkin`。
 
 ### 签到开关与 Cloudflare
@@ -176,8 +175,7 @@ newapi/<siteLabel>/<group>/<model>
 - **一个 provider**：所有站点都挂在 `newapi` 下，站点体现在账号和模型 ID 里。Magpie 的 `auth.provider` 是静态的，无法每个站点动态生成 Provider 卡片。
 - **同一站点的多个账号共用模型 ID 是有意的**。模型 ID 是 `<siteLabel>/<group>/<model>`；Magpie 把各账号的模型表按 ID 合并展示（`host.js` 的 `models[k] ??= m`），两个账号撞 label 时选择器里只出现一份——同站、同组、同模型，多一行只是重复项。
   但**请求不会走错账号**：每个账号的 `accounts[].models` 仍各自记着这个 ID，路由时第二个账号照样是候选（第一个失败会 failover 过去），而且插件在 `fetch` 里把请求固定发往**当前账号自己的站点**（`ownURL`），不会用另一个账号的地址和分组。
-- **一个分组一条 key**。站点的分组可以有好几条 token，插件取最新的那条；旧的那种“同组多 key 轮换”不再有，因为同一分组的多条 token 通常是同一权限的重复。
-- **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
+- **一个分组一条 key**。站点的分组可以有好几条 token，插件取最新的那条；旧的那种“同组多 key 轮换”不再有，因为同一分组的多条 token 通常是同一权限的重复。手填的 key 也写在同一处。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。
 
@@ -189,7 +187,7 @@ newapi/<siteLabel>/<group>/<model>
 | --- | --- |
 | `baseURL`、`siteLabel`、`userId`、`username` | access token（只在 Magpie 的 `auth.key` 里） |
 | `groups`（一张表：倍率、key、问题、是否试过） | `groupKeys`、`pendingGroups`、`keyProblems`、`createdKeys` |
-| `checkin`、`checkinBlocked`、`status` | 问答用的 `pick`、`autoCreate`、`groupkey:<分组>` |
+| `checkin`、`checkinBlocked`、`status` | 问答用的 `pick`、`autoCreate`、`groupFilter`、`groupkey:<分组>` |
 
 Magpie 的 `save()` 会把登录问答的答案整体合进 metadata（`host.js`：`{...inputs, ...result.metadata}`），所以插件在返回结果里把只用于问答的键显式置空，它们就不会被写进账号。
 
@@ -224,12 +222,13 @@ npm run live
 - `index.mjs`：插件入口（`config`、`auth`、`provider` 钩子）。
 - `src/api.mjs`：New API 的 HTTP 接口与错误信封。
 - `src/signin.mjs`：登录、分组/key 发现与回填。
+- `src/session.mjs`：一次登录的中间状态（只在内存，不落盘）。
 - `src/models.mjs`：模型列表与 `api.id` 编码。
 - `src/protocols.mjs`：端点类型 → Magpie 协议。
 - `src/fetch.mjs`：按分组选 key、还原 model、认证头。
 - `src/usage.mjs`：余额与用量窗口。
 - `src/checkin.mjs`：签到、开关、CF/Turnstile 检测。
-- `src/state.mjs`：缓存、key 轮换、`newapi-keys.json`。
+- `src/state.mjs`：分组表、缓存、按分组取 key。
 - `test/mock-newapi.mjs`：本地假站点，覆盖掩码 key、拒绝 reveal、Turnstile、CF 页面、签到旧路径等。
 
 ## 安全与发布
@@ -240,7 +239,7 @@ npm run live
 
 - `.env`、`.env.*`（只保留 `.env.example` 模板）
 - `.live/`（`npm run live` 的本地缓存）
-- `newapi-keys.json`、`plugin-auth.json`
+- `plugin-auth.json`
 - 真实站点地址、账号名、令牌（含掩码片段）、余额与签到额度
 
 `npm run scan` 会检查这些：access token（`nap_...`）、`sk-...`、GitHub/AWS/Slack token、私钥块、`NEWAPI_*` 被填了真实值、以及非示例邮箱。它还会读本地 `.env`，把里面的 token、站点 host、user id 按**值**在全部文件里搜一遍——所以真实域名或用户名不会出现在仓库里，却也拦得住。测试夹具（`test-access-token-...`、`sk-default-key-...` 等）有明确的允许列表。CI 也会跑它，泄漏会直接让构建失败。
