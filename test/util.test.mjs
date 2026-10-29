@@ -3,13 +3,11 @@ import { test } from "node:test";
 
 import {
   cleanLabel,
-  firstKey,
   formatQuota,
   hashKey,
   hostOf,
   isMaskedKey,
   joinURL,
-  mergeGroupKeys,
   maskSecret,
   normalizeBase,
   parseGroupFilter,
@@ -56,13 +54,6 @@ test("parseGroupKeys accepts text and JSON", () => {
   assert.deepEqual(parseGroupKeys("# comment\n\n=sk-x"), {});
   // masked values are not keys
   assert.deepEqual(parseGroupKeys("vip=sk-v***0002"), {});
-});
-
-test("mergeGroupKeys keeps earlier groups and drops masks", () => {
-  const merged = mergeGroupKeys({ default: ["sk-a"] }, { vip: ["sk-b"], default: ["sk-a", "sk-c"] }, { svip: ["sk-v***9"] });
-  assert.deepEqual(merged, { default: ["sk-a", "sk-c"], vip: ["sk-b"] });
-  assert.equal(firstKey(merged, "vip"), "sk-b");
-  assert.equal(firstKey(merged, "svip"), "");
 });
 
 test("isMaskedKey", () => {

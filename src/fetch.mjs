@@ -13,7 +13,7 @@
 
 import { ChallengeError, isAuthError } from "./api.mjs";
 import { authStyleOf, geminiModelSegment, parseWireId } from "./protocols.mjs";
-import { keysToTry } from "./state.mjs";
+import { groupsOf, keysToTry } from "./state.mjs";
 
 /** Read the group and model a request is for. Null when it names neither. */
 export function readTarget(pathname, bodyText) {
@@ -111,7 +111,7 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
   return async function newapiFetch(input, init = {}) {
     const auth = await getAuth();
     const md = auth?.metadata ?? {};
-    const groupKeys = nonEmptyKeys(md.groupKeys);
+    const groups = groupsOf(md);
 
     const href = typeof input === "string" ? input : input?.url ?? String(input);
     let url;
@@ -130,21 +130,21 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
     // account actually has.
     const own = ownURL(href, md);
     const ownPath = new URL(own.href).pathname;
-    const fallbackGroup = defaultGroup(md, groupKeys);
+    const fallbackGroup = defaultGroup(md, groups);
     const named = target?.group ?? "";
     // A group this account knows but has no key for is the user's to fix:
     // answering it with another group's key would spend the wrong group.
     // A group it has never seen came from another account's model, so the
     // account's own default group is what that request means here.
     const known = Object.prototype.hasOwnProperty.call(md.groups ?? {}, named);
-    const group = !named || groupKeys[named] ? named || fallbackGroup : known ? named : fallbackGroup;
+    const group = !named || groups[named]?.key ? named || fallbackGroup : known ? named : fallbackGroup;
     const model = target?.model ?? "";
 
-    const keys = keysToTry(groupKeys, group, model, md.keyInfo ?? {}, 2);
+    const keys = keysToTry(groups, group);
     if (!keys.length) {
       return jsonError(
         503,
-        `New API: no API key for group "${group}". Sign in again and paste ${group}=sk-... (or turn on "Create missing group keys").`,
+        `New API: no usable key for group "${group}". Sign in again to add or replace it.`,
       );
     }
 
@@ -204,18 +204,9 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
   };
 }
 
-function nonEmptyKeys(groupKeys) {
-  const out = {};
-  for (const [group, value] of Object.entries(groupKeys ?? {})) {
-    const list = (Array.isArray(value) ? value : [value]).filter((k) => typeof k === "string" && k.trim());
-    if (list.length) out[group] = list;
-  }
-  return out;
-}
-
 /** The group a request without one belongs to: the site's default, else the first keyed group. */
-export function defaultGroup(md, groupKeys = nonEmptyKeys(md?.groupKeys)) {
-  const names = Object.keys(groupKeys);
+export function defaultGroup(md, groups = groupsOf(md)) {
+  const names = Object.keys(groups).filter((g) => groups[g]?.key && !groups[g]?.problem);
   const wanted = String(md?.defaultGroup ?? "").trim();
   if (wanted && names.includes(wanted)) return wanted;
   if (names.includes("default")) return "default";

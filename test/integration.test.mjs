@@ -9,7 +9,7 @@ import { makeFetch } from "../src/fetch.mjs";
 import { buildUsage } from "../src/usage.mjs";
 import { pressCheckin } from "../src/checkin.mjs";
 import { signIn, validateAccessToken } from "../src/signin.mjs";
-import { groupKeysOf, readCachedKeys } from "../src/state.mjs";
+import { groupsOf, knownAccounts } from "../src/state.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "../src/util.mjs";
 import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
 
@@ -35,6 +35,37 @@ function entry(models, group, model, suffix = "") {
   return found[1];
 }
 
+/** What Magpie's host writes after a sign-in: plugin-auth.json. */
+function saveAuth(directory, signed) {
+  const file = path.join(directory, "plugin-auth.json");
+  let all = {};
+  try {
+    all = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    all = {};
+  }
+  all["newapi"] = { type: "api", key: signed.key, metadata: signed.metadata };
+  fs.writeFileSync(file, JSON.stringify(all, null, 2));
+}
+
+/** Groups with no key and no failed attempt, as the metadata holds them. */
+function pend(md) {
+  return Object.entries(groupsOf(md))
+    .filter(([, g]) => !g.key && !g.tried)
+    .map(([name]) => name)
+    .sort();
+}
+
+/** The key a group holds. */
+function key(md, group) {
+  return groupsOf(md)[group]?.key;
+}
+
+/** Groups that hold a key. */
+function keyed(md) {
+  return Object.keys(groupsOf(md)).filter((g) => groupsOf(md)[g].key);
+}
+
 function has(models, group, model, suffix = "") {
   return Object.keys(models).some((id) => id.endsWith(`/${group}/${model}${suffix}`));
 }
@@ -51,15 +82,15 @@ test("sign in reveals the keys it may and names the groups it may not", async ()
     assert.equal(md.email, md.accountId);
     assert.equal(md.userId, 1);
     assert.deepEqual(Object.keys(md.groups).sort(), ["default", "svip", "vip"]);
-    assert.deepEqual(md.groupKeys.default, [DEFAULT_KEY]);
-    assert.deepEqual(md.groupKeys.vip, [VIP_KEY]);
-    assert.deepEqual(md.pendingGroups, ["svip"]);
+    assert.equal(key(md, "default"), DEFAULT_KEY);
+    assert.equal(key(md, "vip"), VIP_KEY);
+    assert.deepEqual(pend(md), ["svip"]);
     assert.equal(md.checkin, "auto");
     assert.equal(md.status.quotaPerUnit, 500000);
     assert.equal(md.status.checkin, true);
 
-    const cached = readCachedKeys(directory, site.base, 1, "alice");
-    assert.deepEqual(cached.groupKeys.vip, [VIP_KEY]);
+    // Nothing is kept on disk beside the account itself.
+    assert.equal(fs.existsSync(path.join(directory, "newapi-keys.json")), false);
   } finally {
     await site.close();
   }
@@ -79,25 +110,28 @@ test("sign in keeps a pasted key when reveal is denied", async () => {
       { directory },
     );
     const md = authOf(result).metadata;
-    assert.deepEqual(md.groupKeys.default, ["sk-pasted-default-1"]);
-    assert.deepEqual(md.groupKeys.vip, ["sk-pasted-vip-2"]);
-    assert.deepEqual(md.pendingGroups, ["svip"]);
+    assert.equal(key(md, "default"), "sk-pasted-default-1");
+    assert.equal(key(md, "vip"), "sk-pasted-vip-2");
+    assert.deepEqual(pend(md), ["svip"]);
     assert.equal(md.checkin, "off");
   } finally {
     await site.close();
   }
 });
 
-test("a second sign-in keeps keys the cache holds", async () => {
+test("a second sign-in keeps the keys the account had", async () => {
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const directory = tmpdir();
-    await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "svip=sk-pasted-svip-3" }, { directory });
-    const second = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory });
+    const first = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "svip=sk-pasted-svip-3" }, { directory });
+    saveAuth(directory, first);
+
+    // Picking the account it just saved carries its keys over.
+    const account = knownAccounts(directory)[0];
+    const second = await signIn({ pick: account.key }, { directory });
     const md = authOf(second).metadata;
-    // The pasted key survives; the groups the site would not reveal are still missing.
-    assert.deepEqual(md.groupKeys.svip, ["sk-pasted-svip-3"]);
-    assert.deepEqual(md.pendingGroups, ["default", "vip"]);
+    assert.equal(key(md, "svip"), "sk-pasted-svip-3");
+    assert.deepEqual(pend(md), ["default", "vip"]);
   } finally {
     await site.close();
   }
@@ -108,8 +142,8 @@ test("a masked reveal is never taken for a key", async () => {
   try {
     const result = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
     const md = authOf(result).metadata;
-    assert.equal(md.groupKeys.default, undefined);
-    assert.deepEqual(md.pendingGroups, ["default", "svip", "vip"]);
+    assert.equal(key(md, "default"), undefined);
+    assert.deepEqual(pend(md), ["default", "svip", "vip"]);
   } finally {
     await site.close();
   }
@@ -136,7 +170,7 @@ test("models carry the site, the group and a per-model protocol", async () => {
   const site = await startNewAPI();
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const discovered = await discover({ md });
     const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
 
     // default and vip both serve gpt-4o: two Magpie models, not one.
@@ -162,7 +196,7 @@ test("exposeAllProtocols lists every protocol a model supports", async () => {
   const site = await startNewAPI();
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const discovered = await discover({ md });
     const { models } = buildModels({
       md,
       groups: discovered.groups,
@@ -186,7 +220,7 @@ test("a closed pricing square still lists models from /v1/models", async () => {
   const site = await startNewAPI({ pricingClosed: true });
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    const discovered = await discover({ md });
     assert.equal(discovered.pricing, null);
     const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
     assert.ok(has(models, "default", "gpt-4o"));
@@ -212,7 +246,7 @@ test("fetch picks the group's key, restores the model and signs by endpoint", as
     assert.equal(
       chat.status,
       200,
-      `keys=${Object.keys(md.groupKeys)} · groups=${Object.keys(md.groups)} · seed=${md.pendingGroups} · body=${JSON.stringify(seenChat)} · reqs=${site.state.requests.map((r) => `${r.method} ${r.path}->${r.status}`).join(",")}`,
+      `keys=${keyed(md)} · groups=${Object.keys(md.groups)} · seed=${pend(md)} · body=${JSON.stringify(seenChat)} · reqs=${site.state.requests.map((r) => `${r.method} ${r.path}->${r.status}`).join(",")}`,
     );
     assert.equal(seenChat.seen.model, "gpt-4o");
     assert.equal(seenChat.seen.group, "vip");
@@ -282,25 +316,27 @@ test("a group without a key answers how to fix it without lapsing the account", 
     assert.equal(res.headers.get("x-magpie-sign-in"), "kept");
     const body = await res.json();
     assert.match(body.error.message, /svip/);
-    assert.match(body.error.message, /paste/);
+    assert.match(body.error.message, /sign in again/i);
   } finally {
     await site.close();
   }
 });
 
-test("a refused group key tries the group's next key", async () => {
+test("a refused key is not used at all", async () => {
   const site = await startNewAPI();
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    md.groupKeys.vip = ["sk-bad-key-0000", VIP_KEY];
-    const doFetch = makeFetch(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
+    // The site turns the group's key away: the account holds one key per
+    // group, so there is no second to fall back on — the request says so
+    // instead of spending it again.
+    md.groups.vip = { ratio: 0.8, key: "sk-bad-key-0000", problem: "refused" };
+    const doFetch = makeFetch(async () => ({ type: "api", key: md.accessToken, metadata: md }));
     const res = await doFetch(`${site.base}/v1/chat/completions`, {
       method: "POST",
       body: JSON.stringify({ model: JSON.stringify(["vip", "gpt-5"]) }),
     });
-    assert.equal(res.status, 200);
-    const seen = await res.json();
-    assert.equal(seen.seen.auth, VIP_KEY);
+    assert.equal(res.status, 503);
+    assert.equal(site.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 0);
   } finally {
     await site.close();
   }
@@ -322,8 +358,8 @@ test("usage shows the balance as a wallet and spend as text", async () => {
     assert.match(used.display, /1,234 requests/);
     const groups = usage.windows.find((w) => w.name === "Groups");
     assert.match(groups.display, /vip/);
-    const missing = usage.windows.find((w) => w.name === "Missing keys");
-    assert.match(missing.display, /svip/);
+    const missing = usage.windows.find((w) => w.name === "Group keys");
+    assert.match(missing.display, /no key: svip/);
     // A clean read says nothing about the sign-in, which clears a lapse mark.
     assert.equal(usage.signIn, undefined);
   } finally {
@@ -420,10 +456,10 @@ test("autoCreate makes a token for the missing group and reveals it", async () =
       { directory: tmpdir() },
     );
     const md = authOf(result).metadata;
-    assert.deepEqual(md.pendingGroups, []);
+    assert.deepEqual(pend(md), []);
     assert.equal(site.state.created.length, 1);
     assert.equal(site.state.created[0].group, "svip");
-    assert.match(md.groupKeys.svip[0], /^sk-created-/);
+    assert.match(key(md, "svip"), /^sk-created-/);
   } finally {
     await site.close();
   }
@@ -437,9 +473,9 @@ test("groupFilter limits the groups listed and keyed", async () => {
       { directory: tmpdir() },
     );
     const md = { ...authOf(result).metadata, accessToken: result.key };
-    assert.deepEqual(Object.keys(md.groupKeys), ["vip"]);
-    assert.deepEqual(md.pendingGroups, []);
-    const discovered = await discover({ md, groupKeys: groupKeysOf(md) });
+    assert.deepEqual(keyed(md), ["vip"]);
+    assert.deepEqual(pend(md), []);
+    const discovered = await discover({ md });
     const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
     assert.ok(has(models, "vip", "gpt-5"));
     assert.equal(has(models, "default", "gpt-4o"), false);
@@ -636,7 +672,7 @@ test("a group the second account has no key for is not signed with another group
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     // vip exists at the site, but this account was given no key for it.
-    delete md.groupKeys.vip;
+    delete md.groups.vip.key;
     const doFetch = makeFetch(async () => ({ type: "api", key: md.accessToken, metadata: md }));
     const res = await doFetch(`${site.base}/v1/chat/completions`, {
       method: "POST",

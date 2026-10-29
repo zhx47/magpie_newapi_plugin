@@ -178,7 +178,7 @@ Octopus 的做法：
 | --- | --- | --- |
 | 站点（baseURL + access token + 可选 user id） | 插件账号（provider `newapi` 的一个 account） | 一个站点一个账号；余额/签到/模型发现都按账号。 |
 | 用户分组（`default`、`vip`、`svip`、`auto`） | 模型 ID 的命名空间 | `<siteLabel>/<group>/<model>`；不建独立账号。 |
-| 分组 key（`sk-...`） | 账号 metadata 里的 `groupKeys` | 不进 Magpie 的 key 池；由插件 fetch 按分组选。 |
+| 分组（名称 + 倍率 + key + 状态） | 账号 metadata 里的**一个** `groups` map | 不进 Magpie 的 key 池；由插件 fetch 按分组取。 |
 | 模型 + 支持的端点 | Magpie 模型条目 | 每个条目独立 `api.npm`/`api.url`/`api.id`；显示名 `<model> · <siteLabel> · <group> · ×<ratio> · <proto>`。 |
 | access token | 账号的 `key` + `metadata` | `key` 用于账号身份；fetch 不把它发到推理接口。 |
 | 余额/已用/请求数 | `auth.usage` 的窗口 | 用 `balance`（钱包）+ `display`（文本）。 |
@@ -343,7 +343,17 @@ function chooseProtocols(endpoints, model, settings) {
 
 ### 3.5 分组 key 生命周期
 
-> **实现补充：分组会变，所以同步不只在登录时发生。** `src/sync.mjs` 的 `syncAccount()` 在每次读用量（10 分钟节流，8 秒预算）和每次签到（强制）时运行：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token，把结果写回账号 metadata（`client.auth.set`）。已登录的账号因此不需要重登就能跟上新增分组；被吊销的 key 记为 `keyProblems[group]`，在用量卡片上显示为 **Refused keys**。
+> **实现补充：账号状态是一个 `groups` map。**
+>
+> ```jsonc
+> "groups": {
+>   "default": { "ratio": 1,   "key": "sk-..." },
+>   "vip":     { "ratio": 0.8, "key": "sk-...", "problem": "refused" },
+>   "staged":  { "ratio": 1,   "tried": true }
+> }
+> ```
+>
+> `problem` 是 `refused`（站点拒绝该 key）或 `gone`（站点不再提供该分组）；`tried` 表示建过一次但要不到 key，不再建。`src/sync.mjs` 的 `syncAccount()` 在每次读用量（10 分钟节流，8 秒预算）和每次签到（强制）时运行，只写这个 map：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token。
 
 **为什么列模型不参与**：Magpie 给 `provider.models` 的超时是 20 秒（`internal/gui/providers.go:2033`），而且它和别的供应商共用一个列表请求。在那里做同步会让一个大站点必然超时（`context deadline exceeded`）。同步只放在有自己预算的钩子里：`auth.usage`（8 秒预算，内部再和 8 秒的请求超时竞争）和 `auth.checkin`（每天一次，强制）。
 

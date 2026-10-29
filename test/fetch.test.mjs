@@ -83,22 +83,14 @@ test("a base with a path prefix is respected", () => {
   assert.equal(ownURL("https://proxy.example.com/newapi/v1/messages", md).sameSite, true);
 });
 
-test("a key the site refused is passed over while the group has another", async () => {
+test("one key per group: a refused one is not tried, a working one is", async () => {
   const { keysToTry } = await import("../src/state.mjs");
-  const { hashKey } = await import("../src/util.mjs");
-  const good = "sk-good-key-000001";
-  const bad = "sk-refused-key-0001";
-  const groupKeys = { vip: [bad, good] };
-  const keyInfo = { [hashKey(bad)]: { refused: "the site refused it" } };
-
-  for (let i = 0; i < 6; i++) {
-    const keys = keysToTry(groupKeys, "vip", "gpt-5", keyInfo, 2);
-    assert.ok(keys.includes(good), `attempt ${i}: the working key is tried`);
-    assert.ok(!keys.includes(bad) || keys.length === 1, `attempt ${i}: the refused key is passed over`);
-  }
-
-  // With nothing else, it is still tried: a stale verdict must not lock a
-  // group out of every request.
-  const only = keysToTry({ vip: [bad] }, "vip", "gpt-5", keyInfo, 2);
-  assert.deepEqual(only, [bad]);
+  // The metadata holds one key per group, so there is nothing to fall back
+  // on: a refused key answers 503 (the caller says so) instead of spending
+  // the request again on a key the site already turned away.
+  assert.deepEqual(keysToTry({ vip: { key: "sk-a", problem: "refused" } }, "vip"), []);
+  assert.deepEqual(keysToTry({ vip: { key: "sk-a" } }, "vip"), ["sk-a"]);
+  assert.deepEqual(keysToTry({ vip: { key: "sk-a", problem: "gone" } }, "vip"), []);
+  assert.deepEqual(keysToTry({ vip: { tried: true } }, "vip"), []);
+  assert.deepEqual(keysToTry({}, "vip"), []);
 });

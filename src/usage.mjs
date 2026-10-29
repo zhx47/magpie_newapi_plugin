@@ -7,8 +7,8 @@
 // `display`) are read, never counted, so they cannot skew routing.
 
 import { getStatus, getUserSelf } from "./api.mjs";
-import { caches, cacheKey } from "./state.mjs";
-import { groupsNeedingAttention } from "./sync.mjs";
+import { caches, cacheKey, groupsMissing, groupsNeedingAttention, groupsOf, sortGroups } from "./state.mjs";
+
 import { formatQuota, quotaAsNumber, quotaInfo, quotaUnit } from "./util.mjs";
 
 /** The account's own numbers, cached briefly: balances move slowly. */
@@ -56,11 +56,12 @@ export async function buildUsage(md, opts = {}) {
     usd_exchange_rate: status?.usdExchangeRate ?? md.status?.usdExchangeRate,
   });
 
-  const groups = Object.keys(md.groups ?? {}).length ? Object.keys(md.groups) : Object.keys(md.groupKeys ?? {});
-  const groupList = groups.length ? groups.join(", ") : "—";
-  const ratio = Object.entries(md.groups ?? {})
-    .filter(([, v]) => Number(v?.ratio) > 0)
-    .map(([name, v]) => `${name} ×${v.ratio}`)
+  const groupsMap = groupsOf(md);
+  const groupNames = sortGroups(Object.keys(groupsMap));
+  const groupList = groupNames.length ? groupNames.join(", ") : "—";
+  const ratio = groupNames
+    .filter((name) => Number(groupsMap[name].ratio) > 0)
+    .map((name) => `${name} ×${groupsMap[name].ratio}`)
     .join(", ");
 
   // `used` is left off every row but the wallet. Magpie reads a window with
@@ -88,18 +89,19 @@ export async function buildUsage(md, opts = {}) {
     },
   ];
 
-  // Reckoned now, from the groups and the key verdicts of the last sync:
-  // a group with no key, and one whose key the site refuses.
-  const needy = groupsNeedingAttention(md);
-  if (needy.length) {
-    const missing = needy.filter((n) => n.state === "missing").map((n) => n.group);
-    const refused = needy.filter((n) => n.state === "refused");
+  // Reckoned from the one groups map: what has no key, and what the site
+  // turned away. One row, since both mean "sign in again and fix this".
+  const missing = groupsMissing(md);
+  const problems = groupsNeedingAttention(md).filter((g) => !missing.includes(g));
+  if (missing.length || problems.length) {
     const bits = [];
     if (missing.length) bits.push(`no key: ${missing.join(", ")}`);
-    if (refused.length) bits.push(`refused: ${refused.map((n) => `${n.group} (${n.why})`).join(", ")}`);
+    if (problems.length) {
+      bits.push(problems.map((g) => `${g} (${groupsMap[g]?.problem ?? "refused"})`).join(", "));
+    }
     windows.push({
-      name: missing.length ? "Missing keys" : "Refused keys",
-      display: `${bits.join(" · ")} — sign in again to replace them`,
+      name: "Group keys",
+      display: `${bits.join(" · ")} — sign in again to fix`,
     });
   }
 

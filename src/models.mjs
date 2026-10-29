@@ -11,7 +11,7 @@
 // with `/` or `:` cannot break Gemini's URL path.
 
 import { chooseProtocols, isChatEndpoint, labelOf, protocolSuffix, wireId } from "./protocols.mjs";
-import { cacheKey, caches } from "./state.mjs";
+import { cacheKey, caches, groupsOf } from "./state.mjs";
 import { getPricing, getStatus, listModelsForKey, listUserModels } from "./api.mjs";
 import { parseGroupFilter, sortGroups } from "./util.mjs";
 
@@ -99,7 +99,7 @@ export function modelEntry({ catalogId: id, md, group, model, proto, ratio, base
  * square, the status, and one `/v1/models` per group key. Nothing here
  * throws for a single group: a group whose key fails is simply left out.
  */
-export async function discover({ md, groupKeys, fetchImpl, signal }) {
+export async function discover({ md, fetchImpl, signal }) {
   const base = md.baseURL;
   const token = String(md.accessToken ?? md.token ?? "");
   // Status is decoration for the listing (balance units, check-in switches):
@@ -116,26 +116,24 @@ export async function discover({ md, groupKeys, fetchImpl, signal }) {
   );
 
   const groups = {};
-  const tokenInfo = {};
   const wanted = parseGroupFilter(md.groupFilter);
-  const names = Object.keys(groupKeys).filter((g) => !wanted.length || wanted.includes(g));
+  const groupsMap = groupsOf(md);
+  // Only a group with a usable key can list its models by key; the ones
+  // without are filled from the account-scoped list below.
+  const names = Object.keys(groupsMap).filter(
+    (g) => (!wanted.length || wanted.includes(g)) && groupsMap[g].key && !groupsMap[g].problem,
+  );
 
   await Promise.all(
     names.map(async (group) => {
-      const keys = groupKeys[group] ?? [];
-      for (const key of keys) {
-        try {
-          const models = await caches.modelList.getOr(cacheKey(base, group, key), 60_000, () =>
-            listModelsWithRetry(base, key, { fetchImpl, signal }),
-          );
-          if (models.length) {
-            groups[group] = sortGroups([...(groups[group] ?? []), ...models]);
-            tokenInfo[key] = tokenInfo[key] ?? {};
-            break;
-          }
-        } catch {
-          // a dead key: the next one may answer; all dead, the group stays out
-        }
+      const key = groupsMap[group].key;
+      try {
+        const models = await caches.modelList.getOr(cacheKey(base, group, key), 60_000, () =>
+          listModelsWithRetry(base, key, { fetchImpl, signal }),
+        );
+        if (models.length) groups[group] = sortGroups([...(groups[group] ?? []), ...models]);
+      } catch {
+        // the key is dead: the sync marks it, and the group stays out here
       }
     }),
   );
@@ -179,7 +177,7 @@ export async function discover({ md, groupKeys, fetchImpl, signal }) {
     }
   }
 
-  return { status, pricing, groups, tokenInfo };
+  return { status, pricing, groups };
 }
 /**
  * `/v1/models` for a group key, retried once when the connection itself

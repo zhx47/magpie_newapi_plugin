@@ -56,6 +56,27 @@ newapi/<siteLabel>/<group>/<model>
 
 ## 分组 key
 
+### 账号状态只有一个 `groups`
+
+账号的 metadata 里只有一个字段描述分组：
+
+```jsonc
+"groups": {
+  "default": { "ratio": 1,   "key": "sk-..." },
+  "vip":     { "ratio": 0.8, "key": "sk-...", "problem": "refused" },
+  "staged":  { "ratio": 1,   "tried": true }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `ratio` / `desc` | 站点给的分组倍率和描述 |
+| `key` | 该分组的 key（站点有多条时取最新一条） |
+| `problem` | `refused`（站点拒绝了这个 key）或 `gone`（站点不再提供这个分组） |
+| `tried` | 向站点要过 key 但要不到，**不会再建第二个** |
+
+没有分组时就没有这个分组；没有再分开放 key 列表、待办列表、问题表、创建记录——它们本来就是同一个东西的不同视角。也没有 `newapi-keys.json` 这类旁路缓存：账号自己就是唯一状态。
+
 ### 闭环：三个钩子各管一件事
 
 | 钩子 | 职责 | 会不会改账号 |
@@ -111,7 +132,7 @@ newapi/<siteLabel>/<group>/<model>
 - 余额：`/api/user/self` 的 `quota`，按 `/api/status` 的 `quota_per_unit` 换算（默认 500000 quota = $1）。站点关闭货币显示时按原始 quota 显示。
 - 用量卡片只有**余额**是一条读数；「已用」「Groups」「Missing keys / Refused keys」是纯文本行，不会画进度条，也不会显示 `0%`。
   （Magpie 把带 `used` 的窗口当比例；这些行不发送 `used`，所以不会被误画成 0%。）
-- **Refused keys** 一行列出被站点拒绝的 key 及其原因；**Missing keys** 一行列出完全没有 key 的分组。两者都提示重新登录补上。
+- **Group keys** 一行列出两种需要处理的分组：`no key: svip`（完全没有 key）和 `vip (refused)`（key 被站点拒绝）。两者都提示重新登录补上。
 - 签到：`/api/user/self/checkin`，旧版本回退 `/api/user/checkin`。
 
 ### 签到开关与 Cloudflare
@@ -154,7 +175,8 @@ newapi/<siteLabel>/<group>/<model>
 
 - **一个 provider**：所有站点都挂在 `newapi` 下，站点体现在账号和模型 ID 里。Magpie 的 `auth.provider` 是静态的，无法每个站点动态生成 Provider 卡片。
 - **同一站点的多个账号共用模型 ID 是有意的**。模型 ID 是 `<siteLabel>/<group>/<model>`；Magpie 把各账号的模型表按 ID 合并展示（`host.js` 的 `models[k] ??= m`），两个账号撞 label 时选择器里只出现一份——同站、同组、同模型，多一行只是重复项。
-  但**请求不会走错账号**：每个账号的 `accounts[].models` 仍各自记着这个 ID，路由时第二个账号照样是候选（第一个失败会 failover 过去），而且插件在 `fetch` 里把请求固定发往**当前账号自己的站点**（`ownURL`），不会用另一个账号的地址和分组。撞 label 的代价只是模型选择器里少一份重复项。
+  但**请求不会走错账号**：每个账号的 `accounts[].models` 仍各自记着这个 ID，路由时第二个账号照样是候选（第一个失败会 failover 过去），而且插件在 `fetch` 里把请求固定发往**当前账号自己的站点**（`ownURL`），不会用另一个账号的地址和分组。
+- **一个分组一条 key**。站点的分组可以有好几条 token，插件取最新的那条；旧的那种“同组多 key 轮换”不再有，因为同一分组的多条 token 通常是同一权限的重复。
 - **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。

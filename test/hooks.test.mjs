@@ -12,6 +12,19 @@ function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "newapi-hooks-"));
 }
 
+/** A group's key in the account. */
+function key(md, group) {
+  return md.groups?.[group]?.key;
+}
+
+/** Groups with no key and no failed attempt. */
+function pend(md) {
+  return Object.entries(md.groups ?? {})
+    .filter(([, g]) => !g.key && !g.tried)
+    .map(([name]) => name)
+    .sort();
+}
+
 /** What Magpie's host.js writes after a sign-in: plugin-auth.json. */
 function saveAuth(directory, signed) {
   const file = path.join(directory, "plugin-auth.json");
@@ -191,7 +204,7 @@ export function diagnostics(site, auth, ids) {
   return [
     `models=${ids.length}`,
     `groups=${Object.keys(auth.metadata.groups ?? {}).join(",")}`,
-    `keys=${Object.keys(auth.metadata.groupKeys ?? {}).join(",")}`,
+    `groups=${Object.keys(auth.metadata.groups ?? {}).join(",")}`,
     `requests: ${reqs}`,
   ].join(" · ");
 }
@@ -271,7 +284,7 @@ test("checkin off never reaches the site", async () => {
     const result = await instance.auth.checkin(async () => ({
       type: "api",
       key: ACCESS_TOKEN,
-      metadata: { baseURL: site.base, checkin: "off", groupKeys: {} },
+      metadata: { baseURL: site.base, checkin: "off", groups: {} },
     }));
     assert.equal(result.outcome, "inactive");
     assert.equal(site.state.requests.filter((r) => r.path.includes("checkin")).length, 0);
@@ -455,7 +468,7 @@ test("a new group at the site reaches an account signed in before it", async () 
     assert.ok(after, "the account's metadata was written back");
     assert.ok(after.metadata.groups.later, "the new group is in the account now");
     assert.equal(after.metadata.groups.later.ratio, 0.5, "with the site's own ratio");
-    assert.ok(after.metadata.groupKeys.later?.length, "and the key found for it");
+    assert.ok(after.metadata.groups.later.key, "and the key found for it");
   } finally {
     await site.close();
   }
@@ -534,7 +547,8 @@ test("a key is checked once, not again for each listing", async () => {
     await instance.provider.models({ models: {} }, { auth });
     const listCalls = site.state.requests.filter((r) => r.path === "/v1/models");
     // One request per group with a key (default and vip), not two each.
-    assert.ok(listCalls.length <= Object.keys(auth.metadata.groupKeys).length, `${listCalls.length} /v1/models calls`);
+    const keyed = Object.values(auth.metadata.groups ?? {}).filter((g) => g.key).length;
+    assert.ok(listCalls.length <= keyed, `${listCalls.length} /v1/models calls for ${keyed} keys`);
   } finally {
     await site.close();
   }
@@ -549,7 +563,7 @@ test("a slow site does not push a listing past its budget", async () => {
   const { syncAccount } = await import("../src/sync.mjs");
   const started = Date.now();
   const result = await syncAccount(
-    { baseURL: "http://127.0.0.1:1", accessToken: "x", userId: "1", groupKeys: {} },
+    { baseURL: "http://127.0.0.1:1", accessToken: "x", userId: "1", groups: {} },
     { budgetMs: 300 },
   );
   const took = Date.now() - started;
@@ -584,13 +598,18 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
       { directory },
     );
     assert.equal(first.type, "success");
-    assert.deepEqual(first.metadata.pendingGroups, ["svip"]);
+    assert.deepEqual(pend(first.metadata), ["svip"]);
+    saveAuth(directory, first);
 
-    // Second sign-in, same site, nothing typed: the cache supplies what was
-    // pasted, so only svip is asked, and the account identity is unchanged.
+    // Second sign-in, nothing typed: picking the saved account supplies the
+    // token and the keys it already has, so only svip is asked.
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "one-site" };
+    const account = instance.auth.methods[0];
+    const pick = await ask({});
+    assert.equal(pick.key, "pick");
+    const saved = pick.options.find((o) => o.value !== "__new__");
+    const head = { pick: saved.value };
     // One group is missing, so the site is offered the chance to make its key.
     const offer = await ask(head);
     assert.equal(offer.key, "autoCreate");
@@ -599,12 +618,13 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     const q = await ask({ ...head, autoCreate: "no" });
     assert.match(q.key, /^groupkey:/);
     assert.match(q.message, /"svip"/, "only the group still missing is asked");
+    void account;
 
-    const second = await signIn({ ...head }, { directory });
+    const second = await signIn({ ...head, autoCreate: "no" }, { directory });
     assert.equal(second.type, "success");
     assert.equal(second.metadata.accountId, first.metadata.accountId, "the same account, not a new one");
-    assert.deepEqual(second.metadata.groupKeys.default, ["sk-first-default"]);
-    assert.deepEqual(second.metadata.groupKeys.vip, ["sk-first-vip"]);
+    assert.equal(key(second.metadata, "default"), "sk-first-default");
+    assert.equal(key(second.metadata, "vip"), "sk-first-vip");
   } finally {
     await site.close();
   }
@@ -628,7 +648,7 @@ test("letting the site create keys asks nothing by hand", async () => {
     const made = await ask(head);
     assert.equal(made.key, "createdKeys", "the answer carries what was created");
     const created = JSON.parse(made.options[0].value);
-    assert.ok(created.svip?.[0]?.startsWith("sk-created-"), `svip was created: ${JSON.stringify(created)}`);
+    assert.match(created.svip, /^sk-created-/, `svip was created: ${JSON.stringify(created)}`);
 
     // With that answer in hand nothing is asked again, and the account is
     // signed in with the created key.
@@ -640,8 +660,8 @@ test("letting the site create keys asks nothing by hand", async () => {
       { directory },
     );
     assert.equal(signed.type, "success");
-    assert.ok(signed.metadata.groupKeys.svip?.[0]?.startsWith("sk-created-"));
-    assert.deepEqual(signed.metadata.pendingGroups, []);
+    assert.match(key(signed.metadata, "svip"), /^sk-created-/);
+    assert.deepEqual(pend(signed.metadata), []);
   } finally {
     await site.close();
   }
@@ -681,7 +701,7 @@ test("an account already on disk is offered first, and its token reused", async 
     const second = await signIn({ pick: offered.value, autoCreate: "no" }, { directory });
     assert.equal(second.type, "success");
     assert.equal(second.metadata.accountId, first.metadata.accountId);
-    assert.deepEqual(second.metadata.groupKeys.default, ["sk-a"]);
+    assert.equal(key(second.metadata, "default"), "sk-a");
   } finally {
     await site.close();
   }
@@ -724,7 +744,7 @@ test("a group whose token cannot be revealed gets no second token", async () => 
       client: { auth: { set: async ({ body }) => void saved.push(body) } },
       magpie: { options: () => ({ "auto-create-keys": true }) },
     });
-    const mdBase = { ...auth.metadata, groupFilter: "", createAttempted: [] };
+    const mdBase = { ...auth.metadata, groupFilter: "" };
 
     // Three runs, as days would be; each forces the sync.
     for (let day = 0; day < 3; day++) {

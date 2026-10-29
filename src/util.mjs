@@ -146,31 +146,6 @@ function dedupeGroups(groups) {
   return out;
 }
 
-/** Merge key maps; later sources win per group but never drop earlier groups. */
-export function mergeGroupKeys(...maps) {
-  const out = {};
-  for (const map of maps) {
-    if (!map || typeof map !== "object") continue;
-    for (const [group, value] of Object.entries(map)) {
-      const g = normalizeGroupName(group);
-      if (!g) continue;
-      const list = Array.isArray(value) ? value : [value];
-      for (const v of list) {
-        const k = normalizeApiKey(v);
-        if (!k || isMaskedKey(k)) continue;
-        (out[g] ??= []).push(k);
-      }
-    }
-  }
-  return dedupeGroups(out);
-}
-
-/** A single key for a group, or "" when the group has none. */
-export function firstKey(groupKeys, group) {
-  const list = groupKeys?.[group];
-  return Array.isArray(list) && list.length ? list[0] : "";
-}
-
 /** Group names in a stable order: default first, then alphabetical. */
 export function sortGroups(names) {
   return [...new Set(names.filter(Boolean))].sort((a, b) => {

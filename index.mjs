@@ -11,8 +11,8 @@ import { blockedResult, offResult, pressCheckin } from "./src/checkin.mjs";
 import { makeFetch } from "./src/fetch.mjs";
 import { buildModels, discover } from "./src/models.mjs";
 import { PROVIDER, nextQuestion, signIn } from "./src/signin.mjs";
-import { accountOf, caches, groupKeysOf, runtimeMd, withMetadata } from "./src/state.mjs";
-import { groupsNeedingAttention, syncAccount } from "./src/sync.mjs";
+import { accountOf, caches, groupsOf, runtimeMd } from "./src/state.mjs";
+import { syncAccount } from "./src/sync.mjs";
 import { buildUsage } from "./src/usage.mjs";
 
 const pkg = {
@@ -100,11 +100,12 @@ function optionsOf(input) {
 /** Load the account's groups and models from the site, with the caches in state.mjs. */
 async function listingOf(auth, options, hostModels) {
   const md = runtimeMd(auth);
-  const groupKeys = groupKeysOf(md);
-  if (!md.baseURL || !Object.keys(groupKeys).length) {
+  const groups = groupsOf(md);
+  const usableGroups = Object.values(groups).filter((g) => g.key && !g.problem).length;
+  if (!md.baseURL || !usableGroups) {
     return { md, groups: {}, pricing: null, built: { models: {}, perGroup: {} } };
   }
-  const discovered = await discover({ md, groupKeys });
+  const discovered = await discover({ md });
   const built = buildModels({
     md,
     groups: discovered.groups,
@@ -118,7 +119,7 @@ async function listingOf(auth, options, hostModels) {
 async function modelsFor(provider, auth, options) {
   if (!auth) return {};
   const { md, groups, built } = await listingOf(auth, options, provider?.models ?? {});
-  const haveKeys = Object.keys(groupKeysOf(md)).length > 0;
+  const haveKeys = Object.values(groupsOf(md)).some((g) => g.key && !g.problem);
   // Every key failed, or the site answered nothing: throw so Magpie keeps the
   // list it had and says why, instead of emptying the picker. A site that
   // answered but lists only non-chat models is an empty list, not an error.
@@ -231,15 +232,15 @@ export default { id: PROVIDER, server: NewAPI };
  * write failed (the caller goes on with what it read).
  */
 async function refreshAccount(input, auth, { autoCreate = false, force = false, budgetMs } = {}) {
-  const { md} = accountOf(auth);
+  const { md } = accountOf(auth);
   let synced;
   try {
     synced = await syncAccount({ ...runtimeMd(auth) }, { autoCreate, force, budgetMs });
   } catch {
     return null; // a site that is down answers nothing; keep what we have
   }
-  if (!synced.changed) return synced.notes?.length ? { ...auth, metadata: withMetadata(md, synced.fields) } : null;
-  const next = { ...auth, metadata: withMetadata(md, synced.fields) };
+  if (!synced.changed) return null;
+  const next = { ...auth, metadata: { ...md, groups: synced.groups } };
   try {
     await input?.client?.auth?.set?.({ path: { id: PROVIDER }, body: next });
     // The listing kept for this account was made from the old groups.

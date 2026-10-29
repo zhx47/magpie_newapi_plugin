@@ -32,15 +32,14 @@ import {
   hashKey,
   hostOf,
   isMaskedKey,
-  mergeGroupKeys,
   normalizeApiKey,
   normalizeBase,
   parseGroupFilter,
   parseGroupKeys,
   sortGroups,
 } from "./util.mjs";
-import { TtlCache, cacheKey, knownAccounts, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
-import { checkKey, createKeysFor } from "./sync.mjs";
+import { TtlCache, cacheKey, groupsOf, knownAccounts } from "./state.mjs";
+import { checkKey, createKey } from "./sync.mjs";
 
 const PROVIDER = "newapi";
 
@@ -69,37 +68,10 @@ export function tokensByGroup(tokens, defaultGroupName) {
   }
   return out;
 }
-
-function keyInfoOf(tokens, revealed) {
-  const info = {};
-  for (const t of tokens) {
-    const key = revealed.get(t.id);
-    if (!key) continue;
-    info[hashKey(key)] = {
-      exp: t.expiredTime,
-      models: t.modelLimitsEnabled
-        ? String(t.modelLimits ?? "")
-            .split(/[\s,;]+/)
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : undefined,
-    };
-  }
-  return info;
-}
-
 /** A token name to find a created token again by. */
 function tokenName(label, group, stamp) {
   const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
   return `magpie-${cleanLabel(label, "site")}-${safe}-${stamp}`.slice(0, 50);
-}
-
-/**
- * Create tokens for the groups that have none, then find and reveal them.
- * Best effort: whatever fails stays missing and is reported to the user.
- */
-export async function ensureKeys({ base, token, userId, label, groups, tokens, fetchImpl, max = 5 }) {
-  return createKeysFor({ base, token, userId, label, groups, tokens, fetchImpl, max });
 }
 
 // The questions run one per call, and each needs the site's groups: without
@@ -155,12 +127,12 @@ async function surveyOnce(inputs, fetchImpl) {
     revealed = new Map();
   }
 
+  // The newest usable token of each group, with its key when readable.
   const fromTokens = {};
   for (const [group, list] of Object.entries(byGroup)) {
-    for (const t of list) {
-      const key = revealed.get(t.id);
-      if (key) (fromTokens[group] ??= []).push(key);
-    }
+    const newest = [...list].sort((a, b) => b.id - a.id)[0];
+    const key = newest ? revealed.get(newest.id) : "";
+    if (key) fromTokens[group] = key;
   }
 
   return { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens };
@@ -175,18 +147,48 @@ function survey(inputs, fetchImpl) {
   return surveys.getOr(key, 60_000, () => surveyOnce(inputs, fetchImpl));
 }
 
+/**
+ * The keys a sign-in has so far, as one map of group → key: what the site
+ * handed over, what a creation step made, what the user pasted, and — for a
+ * picked account — the keys it already held.
+ */
+export function keysSoFar(found, inputs, picked) {
+  const out = { ...found.fromTokens };
+
+  const fromPick = {};
+  if (picked) {
+    for (const [group, g] of Object.entries(groupsOf(picked.metadata))) {
+      if (g.key && !g.problem) fromPick[group] = g.key;
+    }
+  }
+  const pasted = {};
+  for (const [key, value] of Object.entries(inputs ?? {})) {
+    if (!key.startsWith("groupkey:")) continue;
+    const group = key.slice("groupkey:".length);
+    const k = normalizeApiKey(value);
+    if (group && k && !isMaskedKey(k)) pasted[group] = k;
+  }
+  const legacy = {};
+  for (const [group, value] of Object.entries(parseGroupKeys(inputs?.groupKeys))) {
+    const k = normalizeApiKey(Array.isArray(value) ? value[0] : value);
+    if (k) legacy[group] = k;
+  }
+
+  // Later sources win: a key typed by hand beats one the site offered.
+  for (const src of [fromPick, createdKeys(inputs), pasted, legacy]) {
+    for (const [group, key] of Object.entries(src)) {
+      if (key) out[group] = key;
+    }
+  }
+  return out;
+}
+
 /** The groups a site serves that still need a key, in the order they are asked. */
-function pendingGroupsOf(found, inputs, cachedKeys) {
+function pendingGroupsOf(found, inputs, keys) {
   const filter = parseGroupFilter(inputs?.groupFilter);
-  const known = new Set([
-    ...Object.keys(found.groups ?? {}),
-    ...Object.keys(found.byGroup ?? {}),
-    ...Object.keys(cachedKeys),
-    ...Object.keys(parseGroupKeys(inputs?.groupKeys)),
-  ]);
-  const wanted = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
-  const have = mergeGroupKeys(cachedKeys, found.fromTokens, createdKeys(inputs), parseGroupKeys(inputs?.groupKeys));
-  return sortGroups(wanted.filter((g) => !have[g]?.length));
+  const names = Object.keys(found.groups ?? {});
+  const wanted = filter.length ? names.filter((g) => filter.includes(g)) : names;
+  return sortGroups(wanted.filter((g) => !keys[g]));
 }
 
 /**
@@ -231,11 +233,8 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     return { ...prompt("accessToken"), message: `${found.failed}\nAccess token` };
   }
 
-  const cached = directory
-    ? readCachedKeys(directory, found.base, found.self.id || found.userId, found.self.username)
-    : { groupKeys: {} };
-  const siteCached = directory ? readCachedKeysForSite(directory, found.base) : {};
-  let pending = pendingGroupsOf(found, inputs, mergeGroupKeys(siteCached, cached.groupKeys));
+  const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
+  let pending = pendingGroupsOf(found, inputs, keysSoFar(found, inputs, picked));
   const autoCreate = inputs?.autoCreate;
   const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
 
@@ -270,19 +269,25 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   // Creating takes a request per group, so it happens once: the answer says
   // what came of it, and the next call reads that from `createdKeys`.
   if (pending.length && autoCreate === "yes" && typeof inputs?.[CREATED] !== "string") {
-    const made = await ensureKeys({
-      base: found.base,
-      token: found.token,
-      userId: found.userId,
-      label: cleanLabel(inputs?.siteLabel, hostOf(found.base)),
-      groups: pending,
-      tokens: found.tokens ?? [],
-      fetchImpl,
-    });
-    const created = made.created ?? {};
-    const keys = Object.keys(created);
+    const created = {};
+    const made = [];
+    for (const group of pending) {
+      const key = await createKey({
+        base: found.base,
+        token: found.token,
+        userId: found.userId,
+        label: cleanLabel(inputs?.siteLabel, hostOf(found.base)),
+        group,
+        tokens: found.tokens ?? [],
+        fetchImpl,
+      }).catch(() => undefined);
+      if (key) {
+        created[group] = key;
+        made.push(group);
+      }
+    }
     const failed = pending.filter((g) => !created[g]);
-    const said = keys.length ? `Created a key for ${keys.join(", ")}.` : "The site created no key.";
+    const said = made.length ? `Created a key for ${made.join(", ")}.` : "The site created no key.";
     const left = failed.length
       ? ` ${failed.join(", ")} still need${failed.length === 1 ? "s" : ""} one pasted by hand: the site would not give it up.`
       : "";
@@ -402,7 +407,7 @@ export function resolvePick(inputs, directory) {
   };
 }
 
-/** What the "let the site create them" step made, as groupKeys. */
+/** What the "let the site create them" step made: group → key. */
 export function createdKeys(inputs) {
   const raw = inputs?.[CREATED];
   if (typeof raw !== "string" || !raw) return {};
@@ -410,8 +415,8 @@ export function createdKeys(inputs) {
     const made = JSON.parse(raw);
     const out = {};
     for (const [group, value] of Object.entries(made ?? {})) {
-      const list = (Array.isArray(value) ? value : [value]).map(normalizeApiKey).filter((k) => k && !isMaskedKey(k));
-      if (list.length) out[group] = list;
+      const k = normalizeApiKey(Array.isArray(value) ? value[0] : value);
+      if (k && !isMaskedKey(k)) out[group] = k;
     }
     return out;
   } catch {
@@ -419,7 +424,7 @@ export function createdKeys(inputs) {
   }
 }
 
-/** The keys pasted in the per-group questions, as groupKeys. */
+/** The keys pasted in the per-group questions: group → key. */
 export function pastedKeys(inputs) {
   const out = {};
   for (const [key, value] of Object.entries(inputs ?? {})) {
@@ -439,65 +444,67 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
   const inputs = resolvePick(rawInputs, directory);
   const found = await survey(inputs, fetchImpl);
   if (found.failed) return { type: "failed", error: found.failed };
-  const { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens } = found;
+  const { base, token, userId, status, self, unreachable, groups, pricing, tokens } = found;
 
   const label = cleanLabel(inputs?.siteLabel, hostOf(base));
   const accountId = `${label} (${self.username || self.id || userId || "user"})`;
   const filter = parseGroupFilter(inputs?.groupFilter);
+  const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
 
-  // Keys pasted one group at a time are the freshest, so they win over a
-  // cache; the older free-form field still works for anyone used to it.
-  const manual = mergeGroupKeys(parseGroupKeys(inputs?.groupKeys), createdKeys(inputs), pastedKeys(inputs));
-  const cached = directory ? readCachedKeys(directory, base, self.id || userId, self.username) : { groupKeys: {} };
-  let groupKeys = mergeGroupKeys(cached.groupKeys, fromTokens, manual);
+  const keys = keysSoFar(found, inputs, picked);
 
-  // A filter names the groups the user wants; a key for a group outside it
-  // is left out with the rest, so the account holds only what was asked for.
+  // A filter names the groups the user wants; a key for a group outside it is
+  // left out with the rest, so the account holds only what was asked for.
   if (filter.length) {
-    for (const group of Object.keys(groupKeys)) {
-      if (!filter.includes(group)) delete groupKeys[group];
+    for (const group of Object.keys(keys)) {
+      if (!filter.includes(group)) delete keys[group];
     }
   }
 
+  // The groups the site knows, plus any the picked account had that this
+  // run did not see (one of the site's endpoints may be closed).
   const known = new Set([
     ...Object.keys(groups ?? {}),
-    ...Object.keys(byGroup ?? {}),
-    ...Object.keys(groupKeys),
+    ...Object.keys(keys),
+    ...Object.keys(picked ? groupsOf(picked.metadata) : {}),
   ]);
   const siteGroups = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
-  let pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
 
-  const autoCreate = inputs?.autoCreate === "yes";
-  if (pending.length && autoCreate && !Object.keys(createdKeys(inputs)).length) {
-    const made = await ensureKeys({
-      base,
-      token,
-      userId,
-      label,
-      groups: pending,
-      tokens,
-      fetchImpl,
-    });
-    const created = made.created ?? {};
-    if (Object.keys(created).length) {
-      groupKeys = mergeGroupKeys(groupKeys, created);
-      pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
+  // A caller that answered yes without going through the questions (the CLI,
+  // a server) creates them here.
+  if (inputs?.autoCreate === "yes" && !Object.keys(createdKeys(inputs)).length) {
+    for (const group of sortGroups(siteGroups.filter((g) => !keys[g]))) {
+      const key = await createKey({ base, token, userId, label, group, tokens, fetchImpl }).catch(() => undefined);
+      if (key) keys[group] = key;
     }
   }
 
   // Nothing could be reached and nothing was pasted: this is not a sign-in.
-  if (unreachable && !Object.keys(groupKeys).length) {
+  if (unreachable && !Object.keys(keys).length) {
     return {
       type: "failed",
       error: `Could not reach ${base}. Check the URL and the network, then sign in again.`,
     };
   }
 
-  // Kept even when a group is still missing: a second sign-in picks up here.
-  if (directory) writeCachedKeys(directory, base, self.id || userId, self.username, groupKeys);
-
-  const keyInfo = keyInfoOf(tokens, revealed);
-  const checkinOn = inputs?.checkin !== "off";
+  // One map for the account: every group the site serves, with its ratio, its
+  // key, and — when there is one — what is wrong with the key.
+  const groupsMap = {};
+  const had = picked ? groupsOf(picked.metadata) : {};
+  for (const name of sortGroups([...siteGroups, ...Object.keys(keys)])) {
+    const info = groups?.[name] ?? {};
+    const entry = {};
+    const ratio = Number(info.ratio ?? had[name]?.ratio);
+    if (ratio > 0) entry.ratio = ratio;
+    const desc = String(info.desc ?? had[name]?.desc ?? "");
+    if (desc) entry.desc = desc;
+    if (keys[name]) entry.key = keys[name];
+    // The key the picked account had is the one that was refused before: the
+    // sign-in just gave it another chance, so its verdict stands until the
+    // next sync checks it again.
+    else if (had[name]?.problem) entry.problem = had[name].problem;
+    groupsMap[name] = entry;
+  }
 
   return {
     type: "success",
@@ -510,13 +517,9 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
       username: self.username || "",
       displayName: self.displayName || "",
       siteLabel: label,
-      defaultGroup: self.group || Object.keys(groupKeys)[0] || "default",
       groupFilter: filter.join(","),
-      groups,
-      groupKeys,
-      keyInfo,
-      pendingGroups: pending,
-      checkin: checkinOn ? "auto" : "off",
+      groups: groupsMap,
+      checkin: inputs?.checkin !== "off" ? "auto" : "off",
       checkinBlocked: "",
       status: {
         quotaPerUnit: status?.quotaPerUnit ?? 500000,
@@ -535,6 +538,7 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     },
   };
 }
+
 
 function describe(e) {
   const message = String(e?.message ?? e ?? "").trim();
