@@ -613,7 +613,8 @@ async function markBlocked(client, auth, md, kind) {
 
 | 顺序 | key | 类型 | 说明 |
 | --- | --- | --- | --- |
-| 1 | `baseURL` | text | `https://example.com`、`.../v1` 都可以；插件归一化。 |
+| 0 | `pick` | select | 已有账号时先问：列出 `plugin-auth.json` 里本插件的账号（`<accountId> — <host>`，带分组数与签到状态），末项 `__new__` 表示新站点。选中即由 `resolvePick()` 填出 base/token/userId/label，**不需要重新输入 access token**（Magpie 的 `input.directory` 就是 `settings.Dir()`，`plugin-auth.json` 就在那里）。 |
+| 1 | `baseURL` | text | 只有 `pick=__new__` 时问。`https://example.com`、`.../v1` 都可以；插件归一化。 |
 | 2 | `accessToken` | password | NewAPI 的“系统访问令牌”/PAT；不是 `sk-...` 推理 key。**只问这一次**（方法声明 `keyless: true`，否则 Magpie 会在问题之后再弹一个 API key 框）。 |
 | 3 | `userId` | text | 老版本/AnyRouter 需要；新版本留空。 |
 | 4 | `siteLabel` | text | 模型命名空间前缀；默认 host。 |

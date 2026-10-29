@@ -21,7 +21,8 @@ magpie plugin login newapi
 
 | 顺序 | 字段 | 说明 |
 | --- | --- | --- |
-| 1 | Base URL | `https://newapi.example.com`；`/v1`、`/api`、末尾 `/` 会被归一化掉。 |
+| 0 | **哪个账号** | 已经登录过时，第一个问题就是**账号选择器**：列出已保存的站点（`acme (alice) — newapi.example.com`，带分组数和签到状态）外加「Another site」。**选已有的账号不需要再填 access token**——Magpie 已经存着，插件直接读取复用。 |
+| 1 | Base URL | 只有选「Another site」才问。`https://newapi.example.com`；`/v1`、`/api`、末尾 `/` 会被归一化掉。 |
 | 2 | Access token | 站点「个人设置 → 访问令牌」里的 token。**不是** `sk-...` 推理 key；填了 `sk-` 会被提示改写。**这是唯一一次要求填 token**。 |
 | 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
 | 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
@@ -44,7 +45,7 @@ newapi/<siteLabel>/<group>/<model>
 
 - `example.com/default/gpt-4o` 和 `example.com/vip/gpt-4o` 是**两个模型**：同一个名字在不同分组里不冲突。
 - 模型名是 `model · siteLabel · group · ×倍率 · 协议`，例如：
-  `gpt-5 · 42API · vip · ×0.8 · Responses`
+  `gpt-5 · acme · vip · ×0.8 · Responses`
   站点名来自 `siteLabel`，所以不同站点的同名模型能分清；同一个站点的两个账号共用一个模型 ID 是**有意的**——同站点、同分组、同模型，再列一行只是重复项。协议只在非 chat 时显示。
 - 默认每个模型只用一种协议，按模型类型选：
   - Claude 类 → Anthropic Messages（保留 thinking / cache_control）
@@ -94,7 +95,7 @@ newapi/<siteLabel>/<group>/<model>
 3. 取不到就保留你逐个输入的 key，并用 `<Magpie 配置目录>/newapi-keys.json` 缓存，重登不会丢；
 4. 仍缺 key 的分组会出现在用量卡片的 **Missing keys** 里，提示你重新登录补上。
 
-补 key 的流程：`magpie plugin login newapi` → 填 base URL 和 access token（或直接回车用缓存）→ 插件只问仍然缺的那些分组，一个分组一个输入框。
+补 key 的流程：`magpie plugin login newapi` → **在账号列表里点那个站点**（不用再输 access token）→ 先问要不要让站点自动建 key → 建不出来的才逐个手填。
 
 **填进去的 key 会当场用 `/v1/models` 校验**：站点拒绝时，同一个分组会再问一次，并在标题里说明原因（`API key for group "vip" — the site refused it`）。留空则跳过该分组。
 

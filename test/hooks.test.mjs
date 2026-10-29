@@ -12,6 +12,24 @@ function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "newapi-hooks-"));
 }
 
+/** What Magpie's host.js writes after a sign-in: plugin-auth.json. */
+function saveAuth(directory, signed) {
+  const file = path.join(directory, "plugin-auth.json");
+  let all = {};
+  try {
+    all = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    all = {};
+  }
+  all[signed.metadata.accountId ? "newapi#" + signed.metadata.siteLabel.replace(/[^A-Za-z0-9]+/g, "") : "newapi"] = {
+    type: "api",
+    key: signed.key,
+    metadata: signed.metadata,
+  };
+  fs.writeFileSync(file, JSON.stringify(all, null, 2));
+  return file;
+}
+
 /** Load the plugin as Magpie does, and sign in to the mock. */
 async function setup(options = {}) {
   const site = await startNewAPI(options.site);
@@ -57,7 +75,9 @@ test("auth declares one keyless API method that asks its own questions", async (
     assert.equal(typeof m.ask, "function");
     assert.equal(typeof m.authorize, "function");
 
-    // The questions, in order, as Magpie walks them.
+    // The questions, in order, as Magpie walks them. With an account on
+    // disk the first is a picker; here the directory is empty, so the base
+    // URL comes first.
     const asked = async (inputs) => m.ask(inputs);
     const q1 = await asked({});
     assert.equal(q1.key, "baseURL");
@@ -360,8 +380,8 @@ test("two accounts of one site share a model id on purpose", async () => {
   try {
     const dirA = tmpdir();
     const dirB = tmpdir();
-    const signedA = await signIn({ baseURL: a.base, accessToken: ACCESS_TOKEN, siteLabel: "42API" }, { directory: dirA });
-    const signedB = await signIn({ baseURL: b.base, accessToken: ACCESS_TOKEN, siteLabel: "42API" }, { directory: dirB });
+    const signedA = await signIn({ baseURL: a.base, accessToken: ACCESS_TOKEN, siteLabel: "acme" }, { directory: dirA });
+    const signedB = await signIn({ baseURL: b.base, accessToken: ACCESS_TOKEN, siteLabel: "acme" }, { directory: dirB });
     const instance = await NewAPI({ directory: dirA, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const modelsA = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedA.key, metadata: signedA.metadata } });
     const modelsB = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedB.key, metadata: signedB.metadata } });
@@ -374,11 +394,11 @@ test("two accounts of one site share a model id on purpose", async () => {
     // two sites stays two rows.
     const c = await startNewAPI();
     try {
-      const signedC = await signIn({ baseURL: c.base, accessToken: ACCESS_TOKEN, siteLabel: "43API" }, { directory: tmpdir() });
+      const signedC = await signIn({ baseURL: c.base, accessToken: ACCESS_TOKEN, siteLabel: "other-site" }, { directory: tmpdir() });
       const modelsC = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedC.key, metadata: signedC.metadata } });
       const cId = Object.keys(modelsC).find((k) => k.endsWith("/default/gpt-4o"));
       assert.notEqual(cId, aId);
-      assert.match(cId, /^43API\/default\/gpt-4o$/);
+      assert.match(cId, /^other-site\/default\/gpt-4o$/);
     } finally {
       await c.close();
     }
@@ -622,6 +642,65 @@ test("letting the site create keys asks nothing by hand", async () => {
     assert.equal(signed.type, "success");
     assert.ok(signed.metadata.groupKeys.svip?.[0]?.startsWith("sk-created-"));
     assert.deepEqual(signed.metadata.pendingGroups, []);
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- re-signing in without retyping the token ------------------------------
+
+test("an account already on disk is offered first, and its token reused", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    const first = await signIn(
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", groupKeys: "default=sk-a;vip=sk-b" },
+      { directory },
+    );
+    assert.equal(first.type, "success");
+    saveAuth(directory, first);
+
+    // A brand-new sign-in in the same Magpie: the first question is the
+    // picker, not a base URL and a token to remember.
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+    const pick = await ask({});
+    assert.equal(pick.key, "pick");
+    assert.equal(pick.type, "select");
+    const offered = pick.options.find((o) => o.value !== "__new__");
+    assert.ok(offered, "the saved account is offered");
+    assert.match(offered.label, /one-site/);
+    // The site lists three groups; two of them have a pasted key.
+    assert.match(offered.hint, /3 groups/);
+
+    // Picking it answers the token and the label with nothing typed.
+    const picked = await ask({ pick: offered.value });
+    assert.equal(picked.key, "autoCreate", "it goes straight to the missing group");
+
+    // The sign-in itself needs no token from the caller either.
+    const second = await signIn({ pick: offered.value, autoCreate: "no" }, { directory });
+    assert.equal(second.type, "success");
+    assert.equal(second.metadata.accountId, first.metadata.accountId);
+    assert.deepEqual(second.metadata.groupKeys.default, ["sk-a"]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a new site is still one of the choices", async () => {
+  const site = await startNewAPI();
+  try {
+    const directory = tmpdir();
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory });
+    saveAuth(directory, signed);
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+    const pick = await ask({});
+    const fresh = pick.options.find((o) => o.value === "__new__");
+    assert.ok(fresh, "the way to another site is offered");
+    // Picking it asks for the base URL, as a first sign-in does.
+    const q = await ask({ pick: "__new__" });
+    assert.equal(q.key, "baseURL");
   } finally {
     await site.close();
   }

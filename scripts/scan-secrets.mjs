@@ -64,6 +64,9 @@ const RULES = [
   // the docs' `https://site` and `https://your-site` are placeholders).
   { name: "filled NEWAPI_BASE", re: /NEWAPI_BASE=https?:\/\/(?![a-z-]*site(?:\b|>))[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/ },
   { name: "filled NEWAPI_TOKEN", re: /NEWAPI_TOKEN=[A-Za-z0-9_-]{8,}/ },
+  // A real site label or user written into a doc: the examples are acme and
+  // example.com, everything else in backticks that looks like one is suspect.
+  { name: "an account example that is not an example", re: /`(?!(?:acme|example))[a-z0-9-]{2,20} \([A-Za-z0-9._-]+\) — [a-z0-9.-]+`/i },
   {
     name: "email address",
     re: /\b[A-Za-z0-9._%+-]+@(?!ai-sdk\.|example\.(com|invalid)|npmjs\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/,

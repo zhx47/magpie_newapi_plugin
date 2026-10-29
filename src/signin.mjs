@@ -39,7 +39,7 @@ import {
   parseGroupKeys,
   sortGroups,
 } from "./util.mjs";
-import { TtlCache, cacheKey, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
+import { TtlCache, cacheKey, knownAccounts, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
 import { checkKey } from "./sync.mjs";
 
 const PROVIDER = "newapi";
@@ -220,6 +220,29 @@ function pendingGroupsOf(found, inputs, cachedKeys) {
  * asks the one after it, since a question answered is passed back in.
  */
 export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
+  // An account Magpie already holds needs no token typed from memory: the
+  // first question offers the sites this plugin is signed in to, and picking
+  // one answers the base URL, the token, the user id and the label at once.
+  inputs = resolvePick(inputs, directory);
+  if (!inputs?.baseURL && inputs?.pick === undefined) {
+    const known = knownAccounts(directory);
+    if (known.length) {
+      return {
+        type: "select",
+        key: "pick",
+        message: "Which account? Picking one reuses the access token Magpie already has.",
+        options: [
+          ...known.map((a) => ({
+            label: `${a.accountId} — ${a.base.replace(/^https?:\/\//, "")}`,
+            value: a.key,
+            hint: `${a.groups.length} group${a.groups.length === 1 ? "" : "s"} · ${a.checkin === "off" ? "check-in off" : "check-in on"}`,
+          })),
+          { label: "Another site (paste its access token)", value: NEW_SITE },
+        ],
+      };
+    }
+  }
+
   // The first questions need no lookup.
   if (!inputs?.baseURL) return prompt("baseURL");
   if (!inputs?.accessToken) return prompt("accessToken");
@@ -380,6 +403,28 @@ export function inputKey(group) {
 /** Where the answer to "let the site create the keys" keeps what it made. */
 export const CREATED = "createdKeys";
 
+/** The pick answer that means "a site this plugin has not been signed in to". */
+export const NEW_SITE = "__new__";
+
+/**
+ * The answers a picked account supplies: its base, its token and its
+ * label, as the sign-in Magpie holds has them. An answer the user typed
+ * wins, so a picked account can still be pointed at another token.
+ */
+export function resolvePick(inputs, directory) {
+  const pick = inputs?.pick;
+  if (!pick || pick === NEW_SITE) return inputs;
+  const known = knownAccounts(directory).find((a) => a.key === pick);
+  if (!known) return inputs;
+  return {
+    ...inputs,
+    baseURL: inputs.baseURL || known.base,
+    accessToken: inputs.accessToken || known.accessToken,
+    userId: inputs.userId ?? known.userId,
+    siteLabel: inputs.siteLabel || known.siteLabel,
+  };
+}
+
 /** What the "let the site create them" step made, as groupKeys. */
 export function createdKeys(inputs) {
   const raw = inputs?.[CREATED];
@@ -413,7 +458,8 @@ export function pastedKeys(inputs) {
  * The whole sign-in. `directory` is Magpie's config dir, where the key
  * cache lives.
  */
-export async function signIn(inputs, { directory, fetchImpl } = {}) {
+export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
+  const inputs = resolvePick(rawInputs, directory);
   const found = await survey(inputs, fetchImpl);
   if (found.failed) return { type: "failed", error: found.failed };
   const { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens } = found;

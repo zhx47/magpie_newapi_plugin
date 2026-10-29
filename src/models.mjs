@@ -48,7 +48,7 @@ export function catalogId(md, group, model, proto, suffix) {
  * The name Magpie shows: the model, the site, the group, the ratio and the
  * protocol.
  *
- * `gpt-4o · 42API · vip · ×0.8`. The site label is the first id segment and
+ * `gpt-4o · acme · vip · ×0.8`. The site label is the first id segment and
  * names the row, so a model served by two sites reads as two rows with
  * different sites, and a model served by two accounts of one site reads as
  * one row.

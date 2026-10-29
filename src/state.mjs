@@ -258,6 +258,45 @@ export function runtimeMd(auth) {
   return { ...md, baseURL: base, accessToken: token, userId };
 }
 
+/**
+ * The accounts this plugin already has, read from Magpie's plugin-auth.json:
+ * one per site the user signed in to. A sign-in can then offer them, so
+ * re-entering an access token that Magpie still holds is not something the
+ * user has to do from memory.
+ *
+ * `directory` is Magpie's config dir (the plugin's `input.directory`).
+ */
+export function knownAccounts(directory) {
+  if (!directory) return [];
+  let all;
+  try {
+    all = JSON.parse(fs.readFileSync(path.join(directory, "plugin-auth.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const [key, auth] of Object.entries(all ?? {})) {
+    if (!key.startsWith("newapi")) continue;
+    const md = auth?.metadata ?? {};
+    const base = String(md.baseURL ?? "");
+    if (!base || !auth?.key) continue;
+    out.push({
+      key,
+      base,
+      userId: String(md.userId ?? ""),
+      username: String(md.username ?? ""),
+      siteLabel: String(md.siteLabel ?? ""),
+      accountId: String(md.accountId ?? md.email ?? key),
+      accessToken: String(auth.key),
+      groups: Object.keys(md.groups ?? {}),
+      groupKeys: groupKeysOf(md),
+      checkin: String(md.checkin ?? "auto"),
+    });
+  }
+  // The first account of a site first, then by name.
+  return out.sort((a, b) => a.accountId.localeCompare(b.accountId));
+}
+
 /** An account's metadata with the fields a sync owns replaced, the rest kept. */
 export function withMetadata(md, fields) {
   return { ...(md ?? {}), ...(fields ?? {}) };
