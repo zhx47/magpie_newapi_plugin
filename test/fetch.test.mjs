@@ -82,3 +82,23 @@ test("a base with a path prefix is respected", () => {
   // and a request already under it is left alone
   assert.equal(ownURL("https://proxy.example.com/newapi/v1/messages", md).sameSite, true);
 });
+
+test("a key the site refused is passed over while the group has another", async () => {
+  const { keysToTry } = await import("../src/state.mjs");
+  const { hashKey } = await import("../src/util.mjs");
+  const good = "sk-good-key-000001";
+  const bad = "sk-refused-key-0001";
+  const groupKeys = { vip: [bad, good] };
+  const keyInfo = { [hashKey(bad)]: { refused: "the site refused it" } };
+
+  for (let i = 0; i < 6; i++) {
+    const keys = keysToTry(groupKeys, "vip", "gpt-5", keyInfo, 2);
+    assert.ok(keys.includes(good), `attempt ${i}: the working key is tried`);
+    assert.ok(!keys.includes(bad) || keys.length === 1, `attempt ${i}: the refused key is passed over`);
+  }
+
+  // With nothing else, it is still tried: a stale verdict must not lock a
+  // group out of every request.
+  const only = keysToTry({ vip: [bad] }, "vip", "gpt-5", keyInfo, 2);
+  assert.deepEqual(only, [bad]);
+});

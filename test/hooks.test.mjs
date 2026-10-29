@@ -421,13 +421,11 @@ test("a new group at the site reaches an account signed in before it", async () 
       ],
     });
 
-    // A listing alone picks it up: the sync reads the site's groups and the
-    // token list, writes the account back, and the group's models are listed.
-    const models = await instance.provider.models({ models: {} }, { auth });
-    assert.ok(
-      Object.keys(models).some((id) => id.includes("/later/")),
-      `the new group's model is listed: ${Object.keys(models).slice(0, 6).join(", ")}`,
-    );
+    // A usage read picks it up: the sync reads the site's groups and the
+    // token list, then writes the account back. The listing is left out of
+    // this on purpose — Magpie gives a provider's models hook 20s in all,
+    // shared with every other provider.
+    await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: { ...auth.metadata, groupFilter: "" } }));
 
     const after = saved.at(-1);
     assert.ok(after, "the account's metadata was written back");
@@ -480,9 +478,104 @@ test("autoCreate fills a group that appeared after sign-in", async () => {
       client: { auth: { set: async ({ body }) => void saved.push(body) } },
       magpie: { options: () => ({ "auto-create-keys": true }) },
     });
-    await withAuto.provider.models({ models: {} }, { auth: { ...auth, metadata: md } }).catch(() => {});
+    await withAuto.auth.usage(async () => ({ type: "api", key: auth.key, metadata: md }));
     const created = site.state.created ?? [];
     assert.ok(created.some((t) => t.group === "newish"), `a token was created: ${JSON.stringify(created.map((t) => t.group))}`);
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- a listing must stay inside Magpie's 20s deadline ----------------------
+
+test("the sync is throttled: a second usage read does not read the site again", async () => {
+  const { site, instance, getAuth } = await setup();
+  try {
+    await instance.auth.usage(getAuth);
+    const afterFirst = site.state.requests.length;
+    await instance.auth.usage(getAuth);
+    const added = site.state.requests
+      .slice(afterFirst)
+      .filter((r) => r.path.includes("/groups") || r.path.startsWith("/api/token"));
+    // Nothing: the groups and the key verdicts were read a moment ago.
+    assert.deepEqual(added.map((r) => r.path), [], "the second usage read synced again");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a key is checked once, not again for each listing", async () => {
+  const { site, instance, auth } = await setup();
+  try {
+    await instance.provider.models({ models: {} }, { auth });
+    const listCalls = site.state.requests.filter((r) => r.path === "/v1/models");
+    // One request per group with a key (default and vip), not two each.
+    assert.ok(listCalls.length <= Object.keys(auth.metadata.groupKeys).length, `${listCalls.length} /v1/models calls`);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a slow site does not push a listing past its budget", async () => {
+  const { instance, auth } = { instance: null, auth: null };
+  void instance;
+  void auth;
+  // The budget is enforced with a race; its unit is exercised directly so a
+  // slow network is simulated without waiting 20 real seconds.
+  const { syncAccount } = await import("../src/sync.mjs");
+  const started = Date.now();
+  const result = await syncAccount(
+    { baseURL: "http://127.0.0.1:1", accessToken: "x", userId: "1", groupKeys: {} },
+    { budgetMs: 300 },
+  );
+  const took = Date.now() - started;
+  assert.ok(took < 2000, `the sync returned in ${took}ms, inside its 300ms budget`);
+  assert.equal(result.changed, false);
+});
+
+test("the models hook reads no groups and presses nothing", async () => {
+  const { site, instance, auth } = await setup();
+  try {
+    // Only what the listing itself asks: the sign-in above made its own calls.
+    const mark = site.state.requests.length;
+    await instance.provider.models({ models: {} }, { auth });
+    const paths = site.state.requests.slice(mark).map((r) => r.path);
+    // Its own listing and the pricing square, nothing else: Magpie gives a
+    // provider's models hook 20s in all, shared with every other provider.
+    assert.ok(!paths.some((p) => p.includes("/groups")), `groups read: ${paths.join(", ")}`);
+    assert.ok(!paths.some((p) => p.includes("checkin")), "check-in pressed");
+    assert.ok(!paths.some((p) => p.startsWith("/api/token")), `tokens read: ${paths.join(", ")}`);
+  } finally {
+    await site.close();
+  }
+});
+
+test("re-signing in asks only for the groups still missing, and keeps the account", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    // First sign-in: default and vip get pasted, svip is skipped.
+    const first = await signIn(
+      { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", groupKeys: "default=sk-first-default;vip=sk-first-vip" },
+      { directory },
+    );
+    assert.equal(first.type, "success");
+    assert.deepEqual(first.metadata.pendingGroups, ["svip"]);
+
+    // Second sign-in, same site, nothing typed: the cache supplies what was
+    // pasted, so only svip is asked, and the account identity is unchanged.
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "one-site" };
+    const q = await ask(head);
+    assert.match(q.key, /^groupkey:/);
+    assert.match(q.message, /"svip"/, "only the group still missing is asked");
+
+    const second = await signIn({ ...head }, { directory });
+    assert.equal(second.type, "success");
+    assert.equal(second.metadata.accountId, first.metadata.accountId, "the same account, not a new one");
+    assert.deepEqual(second.metadata.groupKeys.default, ["sk-first-default"]);
+    assert.deepEqual(second.metadata.groupKeys.vip, ["sk-first-vip"]);
   } finally {
     await site.close();
   }

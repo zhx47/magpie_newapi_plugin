@@ -111,8 +111,20 @@ function usableKeys(groupKeys, group, model, keyInfo = {}) {
   return ok.length ? ok : list;
 }
 
-export function nextKey(groupKeys, group, model, keyInfo = {}) {
+/**
+ * The keys a request may be signed with: usable ones, with a key the site
+ * already refused dropped while another is left. The verdict is a hint — a
+ * group whose only key was refused still tries it, since a site can change
+ * its mind and a stale verdict must not lock the group out.
+ */
+function poolKeys(groupKeys, group, model, keyInfo) {
   const pool = usableKeys(groupKeys, group, model, keyInfo);
+  if (pool.length > 1) return pool.filter((key) => !keyInfo[hashKey(key)]?.refused);
+  return pool;
+}
+
+export function nextKey(groupKeys, group, model, keyInfo = {}) {
+  const pool = poolKeys(groupKeys, group, model, keyInfo);
   if (!pool.length) return "";
   const id = `${group}\u0000${model ?? ""}`;
   const at = cursors.get(id) ?? 0;
@@ -122,7 +134,7 @@ export function nextKey(groupKeys, group, model, keyInfo = {}) {
 
 /** Keys tried for one request: the rotating one first, then the rest. */
 export function keysToTry(groupKeys, group, model, keyInfo = {}, limit = 2) {
-  const pool = usableKeys(groupKeys, group, model, keyInfo);
+  const pool = poolKeys(groupKeys, group, model, keyInfo);
   if (!pool.length) return [];
   const first = nextKey(groupKeys, group, model, keyInfo);
   const out = [first];

@@ -265,7 +265,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
       for (const [key, value] of Object.entries(inputs ?? {})) {
         if (!key.startsWith("groupkey:") || !value) continue;
         const forGroup = key.slice("groupkey:".length);
-        const verdict = await checkKey(found.base, value, { fetchImpl });
+        const verdict = await checkKey(found.base, forGroup, value, { fetchImpl });
         if (verdict.ok || verdict.transient) continue;
         return {
           type: "password",

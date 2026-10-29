@@ -115,12 +115,9 @@ async function listingOf(auth, options, hostModels) {
 }
 
 /** The models hook, shared by the provider declaration. */
-async function modelsFor(input, provider, auth, options) {
+async function modelsFor(provider, auth, options) {
   if (!auth) return {};
-  // The list is what a reader picks from, so a group added to the site since
-  // the sign-in is settled here too (on a slow clock: see sync.mjs).
-  const current = await refreshAccount(input, auth, { autoCreate: options.autoCreateKeys });
-  const { md, groups, built } = await listingOf(current ?? auth, options, provider?.models ?? {});
+  const { md, groups, built } = await listingOf(auth, options, provider?.models ?? {});
   const haveKeys = Object.keys(groupKeysOf(md)).length > 0;
   // Every key failed, or the site answered nothing: throw so Magpie keeps the
   // list it had and says why, instead of emptying the picker. A site that
@@ -216,7 +213,7 @@ export const NewAPI = async (input) => {
     provider: {
       id: PROVIDER,
       async models(provider, { auth } = {}) {
-        return modelsFor(input, provider, auth, options());
+        return modelsFor(provider, auth, options());
       },
     },
   };
@@ -233,11 +230,11 @@ export default { id: PROVIDER, server: NewAPI };
  * only what changed. Returns the account as it now stands, or null when the
  * write failed (the caller goes on with what it read).
  */
-async function refreshAccount(input, auth, { autoCreate = false, force = false } = {}) {
+async function refreshAccount(input, auth, { autoCreate = false, force = false, budgetMs } = {}) {
   const { md} = accountOf(auth);
   let synced;
   try {
-    synced = await syncAccount({ ...runtimeMd(auth) }, { autoCreate, force });
+    synced = await syncAccount({ ...runtimeMd(auth) }, { autoCreate, force, budgetMs });
   } catch {
     return null; // a site that is down answers nothing; keep what we have
   }

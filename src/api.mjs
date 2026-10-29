@@ -7,8 +7,12 @@
 
 import { fetchWithTimeout, joinURL } from "./util.mjs";
 
-const DEFAULT_TIMEOUT = 12000;
-const LIST_TIMEOUT = 20000;
+// Magpie gives a provider's whole models hook 20s (gui/providers.go's
+// Refetch). A single request must never be allowed to eat all of it, or the
+// listing fails with "context deadline exceeded" instead of showing the list
+// it could have shown.
+const DEFAULT_TIMEOUT = 8000;
+const LIST_TIMEOUT = 10000;
 
 /** An error that carries the HTTP status and the site's own message. */
 export class ApiError extends Error {

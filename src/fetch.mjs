@@ -140,7 +140,7 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
     const group = !named || groupKeys[named] ? named || fallbackGroup : known ? named : fallbackGroup;
     const model = target?.model ?? "";
 
-    const keys = keysToTry(groupKeys, group, model, {}, 2);
+    const keys = keysToTry(groupKeys, group, model, md.keyInfo ?? {}, 2);
     if (!keys.length) {
       return jsonError(
         503,

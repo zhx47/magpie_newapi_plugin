@@ -343,7 +343,9 @@ function chooseProtocols(endpoints, model, settings) {
 
 ### 3.5 分组 key 生命周期
 
-> **实现补充：分组会变，所以同步不只在登录时发生。** `src/sync.mjs` 的 `syncAccount()` 在每次列模型、读用量（10 分钟节流）和每次签到（强制）时运行：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token，把结果写回账号 metadata（`client.auth.set`）。已登录的账号因此不需要重登就能跟上新增分组；被吊销的 key 记为 `keyProblems[group]`，在用量卡片上显示为 **Refused keys**。
+> **实现补充：分组会变，所以同步不只在登录时发生。** `src/sync.mjs` 的 `syncAccount()` 在每次读用量（10 分钟节流，8 秒预算）和每次签到（强制）时运行：读站点分组、读 token 列表并为缺 key 的分组 reveal、用 `/v1/models` 校验现有 key、按需创建 token，把结果写回账号 metadata（`client.auth.set`）。已登录的账号因此不需要重登就能跟上新增分组；被吊销的 key 记为 `keyProblems[group]`，在用量卡片上显示为 **Refused keys**。
+
+**为什么列模型不参与**：Magpie 给 `provider.models` 的超时是 20 秒（`internal/gui/providers.go:2033`），而且它和别的供应商共用一个列表请求。在那里做同步会让一个大站点必然超时（`context deadline exceeded`）。同步只放在有自己预算的钩子里：`auth.usage`（8 秒预算，内部再和 8 秒的请求超时竞争）和 `auth.checkin`（每天一次，强制）。
 
 #### 3.5.1 发现
 
