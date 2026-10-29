@@ -1,26 +1,23 @@
-// The account's state, kept in one place: Magpie's account metadata.
+// 账号状态只放在一个地方：Magpie 的账号 metadata。
 //
-// A New API account is a site (base URL + access token) and the groups that
-// site serves. Each group has at most one key and at most one problem, so
-// one map holds everything:
+// 一个 New API 账号就是一个站点（baseURL + 访问令牌）加它提供的那些分组。
+// 每个分组最多有一个 key、最多有一个问题，所以一张表就够了：
 //
 //   metadata.groups = {
 //     "default": { ratio: 1,   key: "sk-..." },
 //     "vip":     { ratio: 0.8, key: "sk-...", problem: "refused" },
-//     "staged":  { ratio: 1,   tried: true },        // no key could be had
+//     "staged":  { ratio: 1,   tried: true },        // 要过 key 但要不到
 //   }
 //
-//   ratio    the site's group ratio, when it gives one
-//   desc     the site's description, when it gives one
-//   key      the group's key, the first the site offers
-//   problem  why the key does not work: "refused" (the site turned it away)
-//            or "gone" (the site no longer serves the group)
-//   tried    a key was asked of the site and none could be had: do not make
-//            another one
+//   ratio    站点给的分组倍率（给了才有）
+//   desc     站点给的描述（给了才有）
+//   key      该分组的 key，站点有多条时取最新一条
+//   problem  key 为什么不能用："refused"（站点拒绝）
+//            或 "gone"（站点不再提供这个分组）
+//   tried    向站点要过 key 但要不到，不要再建第二个
 //
-// There is no second copy of this on disk: `signIn` reads the account it is
-// re-signing in to from Magpie's plugin-auth.json, which is where the
-// metadata already lives.
+// 磁盘上没有第二份：重新登录时从 Magpie 的 plugin-auth.json 读账号，
+// metadata 本来就存在那里。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -30,7 +27,7 @@ import { hashKey, isMaskedKey, normalizeApiKey, sortGroups } from "./util.mjs";
 const TTL_MS = 60_000;
 const MAX_ENTRIES = 64;
 
-/** A tiny TTL cache keyed by a string, bounded by MAX_ENTRIES. */
+/** 一个按字符串键的小型 TTL 缓存，最多 MAX_ENTRIES 条。 */
 export class TtlCache {
   constructor(ttl = TTL_MS) {
     this.ttl = ttl;
@@ -44,7 +41,7 @@ export class TtlCache {
       this.map.delete(key);
       return undefined;
     }
-    // refresh recency
+    // 删了再插，保持「最近用过」的顺序
     this.map.delete(key);
     this.map.set(key, hit);
     return hit.value;
@@ -69,9 +66,8 @@ export class TtlCache {
   }
 
   /**
-   * Cached, or computed and kept. A rejection is not cached, and neither is
-   * an empty answer: a site that hiccupped once must not look empty for the
-   * whole TTL.
+   * 命中就返回，否则算出来再存。失败（reject）不缓存，
+   * 空答案也不缓存：站点偶尔抽一下，不该在整个 TTL 里都显示成空。
    */
   async getOr(key, ttl, make) {
     const hit = this.get(key);
@@ -89,10 +85,10 @@ function isEmptyAnswer(value) {
   return false;
 }
 
-/** Module-wide caches, keyed by site and by key hash (never by the key itself). */
+/** 模块级缓存：按站点、按 key 的哈希分区（从不按 key 本身）。 */
 export const caches = {
   status: new TtlCache(10 * 60_000),
-  // A key's verdict from /v1/models, so a listing checks each key once.
+  // 一个 key 在 /v1/models 上的判定，让每次列举只校验一次。
   keyCheck: new TtlCache(5 * 60_000),
   pricing: new TtlCache(TTL_MS),
   modelList: new TtlCache(TTL_MS),
@@ -100,18 +96,18 @@ export const caches = {
   usage: new TtlCache(30_000),
 };
 
-/** The key of a cache entry: the site, and the key's hash when one matters. */
+/** 缓存项的键：站点，加必要时的 key 哈希。 */
 export function cacheKey(base, ...parts) {
   return [base, ...parts.map((p) => (typeof p === "string" && p.length > 24 ? hashKey(p) : String(p ?? "")))].join("|");
 }
 
-// ---- the key a request may use -------------------------------------------
+// ---- 请求可以用哪个 key ------------------------------------------------
 
 /**
- * The keys a request may be signed with, for a group: its key, unless the
- * site refused it or no longer serves the group. One key per group is all
- * the metadata holds, so there is nothing to rotate: a refused key is not
- * tried, since the site already said no and asking again spends the request.
+ * 某个分组签请求能用的 key：就是它自己的 key，除非站点拒绝过它、
+ * 或者站点已经不再提供这个分组。metadata 里每个分组只留一条 key，
+ * 没有可轮换的东西：被拒的 key 不再重试，因为站点已经说不，
+ * 再试一次只是白花一个请求。
  */
 export function keysToTry(groups, group) {
   const entry = groupsOf({ groups })[group];
@@ -119,12 +115,12 @@ export function keysToTry(groups, group) {
   return [entry.key];
 }
 
-/** The key a group holds, for diagnostics. */
+/** 某分组持有的 key，诊断用。 */
 export function nextKey(groups, group) {
   return groupsOf({ groups })[group]?.key ?? "";
 }
 
-/** The groups as the metadata holds them, cleaned of anything unreadable. */
+/** metadata 里的分组表，去掉读不出来的东西。 */
 export function groupsOf(md) {
   const out = {};
   for (const [name, value] of Object.entries(md?.groups ?? {})) {
@@ -143,18 +139,18 @@ export function groupsOf(md) {
   return out;
 }
 
-/** A group's key, or "" when it has none. */
+/** 某分组的 key，没有就返回空串。 */
 export function keyOf(md, group) {
   return groupsOf(md)[group]?.key ?? "";
 }
 
-/** Whether a group has a key the site has not refused. */
+/** 这个分组是否有站点没拒绝过的 key。 */
 export function usable(md, group) {
   const g = groupsOf(md)[group];
   return !!g?.key && !g.problem;
 }
 
-/** The groups the site serves and a key is missing for, in a stable order. */
+/** 站点提供、但还没有 key 的分组，按稳定顺序。 */
 export function groupsMissing(md) {
   const filter = groupFilterOf(md);
   return sortGroups(
@@ -165,7 +161,7 @@ export function groupsMissing(md) {
   );
 }
 
-/** Every group that needs the user: no key, a refused key, or one gone. */
+/** 所有需要用户处理的分组：没 key、key 被拒、或分组已消失。 */
 export function groupsNeedingAttention(md) {
   const filter = groupFilterOf(md);
   return sortGroups(
@@ -175,7 +171,7 @@ export function groupsNeedingAttention(md) {
   );
 }
 
-/** The group filter the user set at sign-in. */
+/** 用户在登录时设的分组过滤。 */
 export function groupFilterOf(md) {
   return String(md?.groupFilter ?? "")
     .split(/[\s,;]+/)
@@ -183,13 +179,12 @@ export function groupFilterOf(md) {
     .filter(Boolean);
 }
 
-/** default first, then alphabetical (util.mjs has the one implementation). */
+/** default 在前，其余按字母（实现只有 util.mjs 里那一份）。 */
 export { sortGroups };
 
 /**
- * The metadata as a self-contained object for the helpers that take one: the
- * base, the access token and the user id in the shape they read, so callers
- * never have to remember which of `auth.key` and `metadata` holds the token.
+ * 账号的自包含视图：base、访问令牌、user id 摆成调用方要读的样子，
+ * 免得每个调用方都去记令牌究竟在 `auth.key` 还是 `metadata` 里。
  */
 export function accountOf(auth) {
   const md = auth?.metadata ?? {};
@@ -201,19 +196,18 @@ export function accountOf(auth) {
   };
 }
 
-/** accountOf, with the token put back into the metadata for helpers that take only that. */
+/** accountOf，但把令牌塞回 metadata，给只接收 metadata 的辅助函数用。 */
 export function runtimeMd(auth) {
   const { md, base, token, userId } = accountOf(auth);
   return { ...md, baseURL: base, accessToken: token, userId };
 }
 
 /**
- * The accounts this plugin already has, read from Magpie's plugin-auth.json:
- * one per site the user signed in to. A sign-in can then offer them, so
- * re-entering an access token that Magpie still holds is not something the
- * user has to do from memory.
+ * 插件已经有的账号，从 Magpie 的 plugin-auth.json 读：用户登录过几个站点
+ * 就有几个。登录时可以把它们列出来，于是「重输一个 Magpie 还存着的
+ * 访问令牌」不再是用户必须凭记忆做的事。
  *
- * `directory` is Magpie's config dir (the plugin's `input.directory`).
+ * `directory` 是 Magpie 的配置目录（插件的 `input.directory`）。
  */
 export function knownAccounts(directory) {
   if (!directory) return [];

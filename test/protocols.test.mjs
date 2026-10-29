@@ -67,7 +67,7 @@ test("wireId round-trips groups and models with punctuation", () => {
   ]) {
     const id = wireId(group, model);
     assert.deepEqual(parseWireId(id), { group, model });
-    // Gemini puts it in a path segment: no unescaped slash or colon survives
+    // Gemini 会把它放进路径段：不能有未转义的斜杠或冒号
     assert.ok(!id.includes("/"));
     assert.ok(!id.includes(":"));
   }

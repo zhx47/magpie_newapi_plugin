@@ -1,21 +1,18 @@
-// Keeping an account current.
+// 让账号保持最新。
 //
-// A New API site's groups change: an operator adds, renames or closes them,
-// and a key can be revoked. The account's metadata holds one map of groups
-// (see state.mjs), and this module is the only thing that writes it after
-// sign-in:
+// New API 站点的分组会变：管理员新增、改名或关闭分组，key 也可能被吊销。
+// 账号的 metadata 里有一张分组表（见 state.mjs），登录之后只有这个模块写它：
 //
-//   - every group the site serves is in the map, with its ratio and
-//     description;
-//   - a group with a usable token at the site gets that key;
-//   - a group whose key the site refuses is marked refused;
-//   - a group the site no longer serves is marked gone, its key kept;
-//   - a group with no key is asked of the site once (when creating is on);
-//     if that fails it is marked tried, so no second token is ever made.
+//   - 站点提供的每个分组都在表里，带倍率和描述；
+//   - 站点已有可用 token 的分组，直接取它的 key；
+//   - 站点拒绝某个 key 时，把该分组标成 refused；
+//   - 站点不再提供的分组标成 gone，key 仍然保留；
+//   - 没有 key 的分组向站点要一次（开了自动创建才要）；
+//     要不到就标成 tried，以后不再建第二个。
 //
-// It runs from `auth.usage` (on a ten-minute clock) and `auth.checkin`
-// (once a day), never from `provider.models`: Magpie gives that hook 20s in
-// all, shared with every other provider, so it stays a pure read.
+// 它只在 `auth.usage`（10 分钟节流）和 `auth.checkin`（每天一次）里跑，
+// 绝不在 `provider.models` 里跑：Magpie 给那个钩子一共 20 秒，
+// 还和其他供应商共用，所以它必须是纯读。
 
 import {
   ChallengeError,
@@ -29,24 +26,24 @@ import {
 } from "./api.mjs";
 import { caches, cacheKey, groupFilterOf, groupsOf, sortGroups } from "./state.mjs";
 import { cleanLabel, normalizeApiKey } from "./util.mjs";
+import { t } from "./i18n.mjs";
 
-/** How long a read trusts what it last saw. */
+/** 一次读取信任它上次看到的结果多久。 */
 export const SYNC_EVERY_MS = 10 * 60_000;
 
 /**
- * When each account was last synced, in memory. A metadata field would only
- * be written when something else changed, so an account whose groups were
- * steady would sync on every read.
+ * 每个账号上次同步的时间，只放内存。写成 metadata 字段的话，
+ * 只有别的东西也变了才会写回，于是分组稳定的账号每次读取都会重新同步
+ * ——这正是它取代的那个 bug。
  */
 const lastSync = new Map();
 
 /**
- * Whether a key works, by asking the site for the models it may call. The
- * answer is the same request a listing makes for the group, so it is kept in
- * that cache under the same key: a sign-in, the sync and the model list then
- * cost one request per key, not three.
+ * 一个 key 能不能用：向站点要它能调的模型。这和列举模型时对同一分组发的
+ * 是同一个请求，所以共用那个缓存键：登录、同步、列模型加起来只花
+ * 每个 key 一次请求，而不是三次。
  *
- * The answer's `why` is what a group's `problem` records: "refused".
+ * 回答里的 `why` 就是分组的 `problem` 记的东西："refused"。
  */
 export async function checkKey(base, group, key, { fetchImpl } = {}) {
   const k = normalizeApiKey(key);
@@ -65,12 +62,12 @@ export async function checkKey(base, group, key, { fetchImpl } = {}) {
     else if (e?.status === 0) return { ok: false, why: "unreachable", transient: true };
     else out = { ok: false, why: "refused" };
   }
-  // A network blip is not a verdict.
+  // 网络抖动不是判定结果，不缓存。
   if (!out.transient) caches.keyCheck.set(cache, out, 5 * 60_000);
   return out;
 }
 
-/** The site's groups now, or null when it could not be asked. */
+/** 站点当前的分组，问不到就返回 null。 */
 export async function readGroups({ base, token, userId, fetchImpl }) {
   try {
     const groups = await getUserGroups(base, token, userId, { fetchImpl });
@@ -82,9 +79,8 @@ export async function readGroups({ base, token, userId, fetchImpl }) {
 }
 
 /**
- * Keys for the groups that have none, taken from the tokens the site already
- * holds: the newest usable token of each group is revealed. Nothing is
- * created here.
+ * 给还没有 key 的分组找 key，来源是站点已经有的 token：
+ * 每个分组取最新那条可用的 token，reveal 出它的 key。这里不创建任何东西。
  */
 export async function keysFromTokens({ base, token, userId, groups, tokens, fetchImpl }) {
   const found = {};
@@ -104,20 +100,18 @@ export async function keysFromTokens({ base, token, userId, groups, tokens, fetc
       if (key) found[group] = key;
     }
   } catch {
-    // not readable: the caller leaves those groups to the user
+    // 读不出来：这些分组交给用户手填
   }
   return found;
 }
 
 /**
- * Ask the site to make a token for a group and take its key. One token, one
- * group, no retry: `undefined` means "nothing could be had", which the caller
- * records as tried.
+ * 让站点为某个分组建一个 token 并取回 key。一个 token、一个分组、不重试：
+ * 返回 `undefined` 表示「没要到」，调用方据此把分组标成 tried。
  *
- * The new token is found by the ids the list did not have before, not by its
- * name: a name is truncated and stamped, and a mismatch once looked like
- * "nothing was created" and was retried for ever — a hundred tokens for one
- * group.
+ * 新 token 靠「列表里多出来的 id」找，不靠名字：名字会被截断并带时间戳，
+ * 一旦对不上就像「什么都没建成」，于是被无限重试——一个分组就这样堆出
+ * 一百多个 token。
  */
 export async function createKey({ base, token, userId, label, group, tokens, fetchImpl }) {
   const before = new Set((tokens ?? []).map((t) => t.id));
@@ -142,11 +136,10 @@ export async function createKey({ base, token, userId, label, group, tokens, fet
 }
 
 /**
- * Bring an account's `groups` up to date.
+ * 把账号的 `groups` 更新到最新。
  *
- * Returns `{ groups, changed, notes }`: `groups` is the whole map to write
- * back, or the one it already had when nothing changed. A site that cannot be
- * reached leaves everything as it was.
+ * 返回 `{ groups, changed, notes }`：`groups` 是要写回的整张表，
+ * 什么都没变时就是原来那张。站点连不上就原样不动。
  */
 export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Date.now(), force = false, budgetMs = 8000 } = {}) {
   const base = String(md?.baseURL ?? "");
@@ -155,14 +148,13 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
   const before = groupsOf(md);
   const notes = [];
 
-  if (!base || !token) return { groups: before, changed: false, notes: ["not signed in"] };
+  if (!base || !token) return { groups: before, changed: false, notes: [t("not signed in")] };
   const id = `${base}|${userId || "user"}`;
   const last = lastSync.get(id) ?? 0;
   if (!force && now - last < SYNC_EVERY_MS) return { groups: before, changed: false, notes: [] };
   lastSync.set(id, now);
 
-  // Whatever was read before the budget ran out is what gets written; the
-  // rest is settled on a later run.
+  // 预算用完前读到多少就写多少，剩下的留到下一次。
   const deadline = now + budgetMs;
   const left = () => deadline - Date.now();
   const inTime = async (p) => {
@@ -179,13 +171,13 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     }
   };
 
-  // The site's own list of groups: names, ratios, descriptions.
+  // 站点自己的分组表：名字、倍率、描述。
   let siteGroups = null;
   try {
     siteGroups = await inTime(readGroups({ base, token, userId, fetchImpl }));
-    if (!siteGroups) notes.push("the site's groups could not be read");
+    if (!siteGroups) notes.push(t("the site's groups could not be read"));
   } catch (e) {
-    notes.push(`the site's groups could not be read: ${String(e?.message ?? e).slice(0, 100)}`);
+    notes.push(`读不到站点的分组：${String(e?.message ?? e).slice(0, 100)}`);
   }
 
   const next = {};
@@ -196,15 +188,15 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     if (ratio > 0) entry.ratio = ratio;
     if (typeof info?.desc === "string" && info.desc) entry.desc = info.desc;
     if (old.key) entry.key = old.key;
-    // A problem is about the key the site had, not the group: keep it while
-    // the key it was seen with is still the one held.
+    // 问题是针对「站点手里的那个 key」的，不是针对分组：
+    // 只要还持有当初被判定的那个 key，就保留这个判定。
     if (old.problem && old.problem !== "gone" && old.key) entry.problem = old.problem;
     if (!entry.key && old.tried) entry.tried = true;
     next[name] = entry;
   }
 
-  // A group the site no longer serves: its key is kept (the group may come
-  // back) and it is marked gone, so nothing lists or uses it.
+  // 站点不再提供的分组：key 留着（分组可能回来），标成 gone，
+  // 这样没有地方会列出或使用它。
   if (siteGroups) {
     for (const [name, old] of Object.entries(before)) {
       if (name in next) continue;
@@ -216,14 +208,14 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
   const filter = groupFilterOf(md);
   const wanted = filter.length ? siteNames.filter((g) => filter.includes(g)) : siteNames;
 
-  // Groups with no key: the site's tokens first, then new ones if allowed.
+  // 没有 key 的分组：先看站点已有的 token，允许创建时再建新的。
   let needKeys = sortGroups(wanted.filter((g) => !next[g]?.key && !next[g]?.tried));
   if (needKeys.length) {
     const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }))) ?? [];
     const found = await keysFromTokens({ base, token, userId, groups: needKeys, tokens, fetchImpl });
     for (const [group, key] of Object.entries(found)) {
       next[group] = { ...next[group], key };
-      notes.push(`found a key for ${group}`);
+      notes.push(`从站点找到了 ${group} 的 key`);
     }
     needKeys = needKeys.filter((g) => !next[g]?.key);
 
@@ -234,7 +226,7 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
         if (key) {
           next[group] = { ...next[group], key };
           delete next[group].tried;
-          notes.push(`created a key for ${group}`);
+          notes.push(`为 ${group} 创建了 key`);
         } else {
           next[group] = { ...next[group], tried: true };
         }
@@ -242,8 +234,8 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     }
   }
 
-  // Every key the account holds is checked: a refused one is the same as a
-  // missing one, and saying so is what gets it replaced.
+  // 账号持有的每个 key 都校验一遍：被拒的等于没有，
+  // 把它说出来，用户才会去换。
   await inTime(
     Promise.all(
       sortGroups(Object.keys(next))
@@ -259,7 +251,7 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
             return;
           }
           next[group] = { ...next[group], problem: "refused" };
-          notes.push(`${group}: refused`);
+          notes.push(`${group}: 被站点拒绝`);
         }),
     ),
   );

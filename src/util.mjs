@@ -1,12 +1,11 @@
-// Small shared helpers: URL normalization, hashing, key masking, quotas.
-// Nothing here talks to the network; everything is pure and testable.
+// 共用的小工具：URL 归一化、哈希、key 掩码、额度换算。
+// 这里不发网络请求，全是纯函数，方便测试。
 
-/** Normalize a New API base URL to scheme + host (+ optional sub path), no trailing slash. */
+/** 把 New API 站点地址归一化成「协议 + 主机（+ 可选子路径）」，去掉末尾斜杠。 */
 export function normalizeBase(input) {
   let s = String(input ?? "").trim();
   if (!s) return "";
-  // A host typed without a scheme gets https; anything with another scheme
-  // is refused rather than mangled into an https URL.
+  // 没写协议的主机补 https；写了别的协议就拒绝，不要硬改成 https。
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
     if (!/^https?:\/\//i.test(s)) return "";
   } else {
@@ -19,9 +18,9 @@ export function normalizeBase(input) {
     return "";
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return "";
-  if (!u.host) return "";
-  // /v1, /v1beta and /api are API roots, not site roots: strip them so the
-  // same site typed either way lands on one account and one key cache.
+  if (!u.host) return ""; 
+  // /v1、/v1beta、/api 是接口前缀，不是站点根：去掉它们，
+  // 同一个站点无论怎么写都落到同一个账号上。
   let path = u.pathname.replace(/\/+$/, "");
   path = path.replace(/\/(v1beta|v1|api)$/i, "");
   u.hash = "";
@@ -29,7 +28,7 @@ export function normalizeBase(input) {
   return `${u.protocol}//${u.host}${path}`;
 }
 
-/** The host of a normalized base, used as the default site label. */
+/** 归一化地址里的主机，用作默认的站点标识。 */
 export function hostOf(base) {
   try {
     return new URL(base).host;
@@ -38,21 +37,21 @@ export function hostOf(base) {
   }
 }
 
-/** A site label safe to sit in a model id: no spaces, no slashes. */
+/** 能安全放进模型 ID 的站点标识：不留空格和斜杠。 */
 export function cleanLabel(input, fallback = "") {
   const s = String(input ?? "").trim();
   if (!s) return fallback;
   return s.replace(/[\s/\\]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || fallback;
 }
 
-/** Join a base and a path without doubling slashes. */
+/** 拼接 base 与路径，不会出现重复斜杠。 */
 export function joinURL(base, path) {
   const b = String(base ?? "").replace(/\/+$/, "");
   const p = String(path ?? "").replace(/^\/+/, "");
   return p ? `${b}/${p}` : b;
 }
 
-/** Stable non-cryptographic hash, used for in-memory cache keys only. */
+/** 稳定的非加密哈希，只用于内存缓存的键。 */
 export function hashKey(s) {
   let h = 2166136261;
   const str = String(s ?? "");
@@ -63,7 +62,7 @@ export function hashKey(s) {
   return (h >>> 0).toString(36);
 }
 
-/** Mask a secret for messages: first 4 and last 4, enough to recognize it. */
+/** 把密钥打码后放进消息：保留前 4 位和后 4 位，足够辨认。 */
 export function maskSecret(s) {
   const str = String(s ?? "");
   if (!str) return "";
@@ -71,7 +70,7 @@ export function maskSecret(s) {
   return `${str.slice(0, 4)}${"*".repeat(10)}${str.slice(-4)}`;
 }
 
-/** Replace any known secret that leaked into a string with its mask. */
+/** 把漏进字符串里的已知密钥换成打码形式。 */
 export function scrubSecrets(text, secrets) {
   let out = String(text ?? "");
   for (const s of secrets ?? []) {
@@ -81,19 +80,19 @@ export function scrubSecrets(text, secrets) {
   return out;
 }
 
-/** New API stores a token key without the sk- prefix. Keys may come either way. */
+/** New API 存的 token key 不带 sk- 前缀；用户可能带，也可能不带。 */
 export function normalizeApiKey(input) {
   return String(input ?? "").trim();
 }
 
-/** Whether a token list entry's key is masked (the list endpoint never reveals it). */
+/** 判断 token 列表里的 key 是否是掩码（列表接口从不返回完整 key）。 */
 export function isMaskedKey(value) {
   const s = String(value ?? "");
   if (!s) return false;
   return s.includes("*") || s.includes("•");
 }
 
-/** Parse "vip=sk-1;default=sk-2" / newline / comma / JSON into { group: [keys] }. */
+/** 把 "vip=sk-1;default=sk-2"（或换行、逗号、JSON）解析成 { 分组: [key] }。 */
 export function parseGroupKeys(input) {
   const out = {};
   const raw = String(input ?? "").trim();
@@ -101,7 +100,7 @@ export function parseGroupKeys(input) {
   const add = (group, key) => {
     const g = normalizeGroupName(group);
     const k = normalizeApiKey(key);
-    // A masked key is what the site's list shows, never a usable key.
+    // 掩码是站点列表的显示形式，不能当 key 用。
     if (!g || !k || isMaskedKey(k)) return;
     (out[g] ??= []).push(k);
   };
@@ -114,7 +113,7 @@ export function parseGroupKeys(input) {
       }
       return dedupeGroups(out);
     } catch {
-      // fall through to the text form
+      // 解析失败就退回文本形式
     }
   }
   for (const line of raw.split(/[\n;,]+/)) {
@@ -146,7 +145,7 @@ function dedupeGroups(groups) {
   return out;
 }
 
-/** Group names in a stable order: default first, then alphabetical. */
+/** 分组名按稳定顺序：default 在前，其余按字母。 */
 export function sortGroups(names) {
   return [...new Set(names.filter(Boolean))].sort((a, b) => {
     if (a === "default") return -1;
@@ -155,7 +154,7 @@ export function sortGroups(names) {
   });
 }
 
-/** Parse the group filter prompt (comma separated). Empty means all. */
+/** 解析「只同步这些分组」的回答（逗号分隔）。空表示全部。 */
 export function parseGroupFilter(input) {
   return String(input ?? "")
     .split(/[\s,;]+/)
@@ -164,9 +163,8 @@ export function parseGroupFilter(input) {
 }
 
 /**
- * Quota display: New API counts 1 currency unit as quota_per_unit quota
- * (500000 by default). `display` controls whether the site shows money or
- * raw quota, and `symbol`/`rate` when it shows a currency of its own.
+ * 额度显示：New API 把 1 个货币单位记为 quota_per_unit 点额度（默认 500000）。
+ * `display` 决定站点按货币还是按原始额度显示，`symbol`/`rate` 是它用自有货币时的符号与汇率。
  */
 export function quotaInfo(status) {
   const perUnit = Number(status?.quota_per_unit) > 0 ? Number(status.quota_per_unit) : 500000;
@@ -180,9 +178,9 @@ export function quotaInfo(status) {
         : displayType === "USD"
           ? "$"
           : String(status?.custom_currency_symbol ?? "") || "$";
-  // New API's own rule (GetUsdToCurrencyRate): USD is 1, CNY uses the site's
-  // usd_exchange_rate, CUSTOM its custom rate, TOKENS has none. Reading only
-  // the custom rate showed a CNY site's ¥37.30 as ¥5.11.
+  // New API 自己的规则（GetUsdToCurrencyRate）：USD 是 1，CNY 用站点的
+  // usd_exchange_rate，CUSTOM 用自定义汇率，TOKENS 没有货币。
+  // 只读自定义汇率时，人民币站点的 ¥37.30 会显示成 ¥5.11。
   const usdRate = Number(status?.usd_exchange_rate ?? status?.price) > 0 ? Number(status?.usd_exchange_rate ?? status?.price) : 1;
   const customRate =
     Number(status?.custom_currency_exchange_rate) > 0 ? Number(status.custom_currency_exchange_rate) : 1;
@@ -191,31 +189,31 @@ export function quotaInfo(status) {
   return { perUnit, currency, symbol, rate, displayType };
 }
 
-/** Render a quota amount as money or raw quota, as the site displays it. */
+/** 按站点的显示方式，把额度渲染成金额或原始额度。 */
 export function formatQuota(quota, info) {
   const q = Number(quota);
   if (!Number.isFinite(q)) return "—";
   if (!info?.currency) return `${Math.round(q).toLocaleString("en-US")} quota`;
   const money = (q / info.perUnit) * (info.rate || 1);
-  // Whole units read at cents, like the site's own card; under one unit the
-  // extra digits are the only way to see anything at all.
+  // 满一个单位就按分显示，和站点自己的卡片一致；不足一个单位时多留几位，
+  // 否则什么都看不出来。
   const digits = Math.abs(money) >= 1 ? 2 : 4;
   return `${info.symbol}${money.toFixed(digits)}`;
 }
 
-/** A quota amount as a plain number for a wallet window (in the site's unit). */
+/** 钱包窗口要的数字（按站点单位），不带符号。 */
 export function quotaAsNumber(quota, info) {
   const q = Number(quota) || 0;
   if (!info?.currency) return q;
   return Number(((q / info.perUnit) * (info.rate || 1)).toFixed(6));
 }
 
-/** Unit label for a wallet window. */
+/** 钱包窗口的单位。 */
 export function quotaUnit(info) {
   return info?.currency ? info.symbol || "$" : "quota";
 }
 
-/** Fetch with a timeout, cancelled by the caller's signal as well. */
+/** 带超时的 fetch，同时响应调用方自己的 signal。 */
 export async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error(`timed out after ${timeoutMs} ms`)), Math.max(1, timeoutMs));

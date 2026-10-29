@@ -1,17 +1,16 @@
-// End-to-end against a real New API site: sign in with the plugin's own code
-// path, list models, read the balance, read the check-in state, and send one
-// small request through the loader's fetch.
+// 对一个真实 New API 站点跑一遍完整链路：用插件自己的代码路径登录、
+// 列模型、读余额、读签到状态，再通过 loader 的 fetch 发一个很小的请求。
 //
-// The check-in is only read, never pressed: this script is for looking at a
-// site, and pressing a real account's check-in is the user's call. Set
-// NEWAPI_PRESS_CHECKIN=1 to press it anyway.
+// 签到只读、不按下去：这个脚本是用来观察站点的，
+// 真正按下一个真实账号的签到是用户自己的决定。
+// 想让它真的按，就设 NEWAPI_PRESS_CHECKIN=1。
 //
-// Usage:
-//   cp .env.example .env   # then fill it in; .env is git-ignored
+// 用法：
+//   cp .env.example .env   # 然后填好；.env 已被 git 忽略
 //   npm run live
 //
-// or with the variables set in the environment directly:
-//   NEWAPI_BASE=https://site NEWAPI_TOKEN=... npm run live
+// 也可以直接用环境变量：
+//   NEWAPI_BASE=https://站点 NEWAPI_TOKEN=... npm run live
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { NewAPI } from "../index.mjs";
 import { signIn } from "../src/signin.mjs";
 
-/** Read .env beside the package, without a dependency. Never overrides the real environment. */
+/** 读包目录下的 .env，不引入依赖；不覆盖已有的环境变量。 */
 function loadEnv(file) {
   let text;
   try {
@@ -94,7 +93,7 @@ for (const w of usage.windows ?? []) {
   console.log(`  ${w.name.padEnd(12)} ${w.balance !== undefined ? `balance=${w.balance} ${w.unit ?? ""}` : ""} ${w.display ?? ""}`);
 }
 
-// Read the check-in state; press only when asked.
+// 只读签到状态；明确要求时才按下去。
 if (process.env.NEWAPI_PRESS_CHECKIN === "1") {
   const state = await instance.auth.checkin(async () => auth);
   console.log("checkin     :", state.outcome, "|", state.message);
@@ -109,7 +108,7 @@ if (process.env.NEWAPI_PRESS_CHECKIN === "1") {
   );
 }
 
-// A real request through the loader's fetch, using the smallest model.
+// 用最小的模型，通过 loader 的 fetch 发一个真实请求。
 const loader = instance.auth.loader(async () => auth);
 const pick = ids.find((id) => id.endsWith("/deepseek-v4.1-flash")) ?? ids[0];
 const chosen = models[pick];

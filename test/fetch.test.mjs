@@ -46,7 +46,7 @@ test("wireId stays safe in a Gemini path", () => {
   assert.deepEqual(readTarget(`/v1beta/models/${seg}:generateContent`, ""), { group: "vip", model: "vendor/model:beta" });
 });
 
-// ---- the URL always belongs to the account doing the asking ---------------
+// ---- URL 始终属于发起请求的那个账号 ---------------------------------------
 
 import { ownURL } from "../src/fetch.mjs";
 
@@ -59,9 +59,8 @@ test("a URL at the account's own site is left exactly as Magpie built it", () =>
 });
 
 test("a URL at another site is rebuilt on the account's own base", () => {
-  // The merged model list gave the first account's api.url (site A) while the
-  // account doing the asking is site B: sending there would sign A's request
-  // with B's key.
+  // 合并后的模型列表给的是第一个账号的 api.url（站点 A），
+  // 而发起请求的是站点 B：发到那里就等于用 B 的 key 签 A 的请求。
   const md = { baseURL: "https://b.example.com" };
   const got = ownURL("https://a.example.com/v1/chat/completions", md);
   assert.equal(got.sameSite, false);
@@ -79,15 +78,14 @@ test("a base with a path prefix is respected", () => {
   const md = { baseURL: "https://proxy.example.com/newapi" };
   const got = ownURL("https://a.example.com/v1/messages", md);
   assert.equal(got.href, "https://proxy.example.com/newapi/v1/messages");
-  // and a request already under it is left alone
+  // 已经在它下面的请求原样不动
   assert.equal(ownURL("https://proxy.example.com/newapi/v1/messages", md).sameSite, true);
 });
 
 test("one key per group: a refused one is not tried, a working one is", async () => {
   const { keysToTry } = await import("../src/state.mjs");
-  // The metadata holds one key per group, so there is nothing to fall back
-  // on: a refused key answers 503 (the caller says so) instead of spending
-  // the request again on a key the site already turned away.
+  // metadata 里每个分组只有一条 key，没有后备可退：被拒的 key 直接回 503
+  //（调用方会说明），而不是拿站点已经拒绝的 key 再花一次请求。
   assert.deepEqual(keysToTry({ vip: { key: "sk-a", problem: "refused" } }, "vip"), []);
   assert.deepEqual(keysToTry({ vip: { key: "sk-a" } }, "vip"), ["sk-a"]);
   assert.deepEqual(keysToTry({ vip: { key: "sk-a", problem: "gone" } }, "vip"), []);

@@ -22,20 +22,20 @@ function authOf(result) {
   return { type: "api", key: result.key, metadata: result.metadata };
 }
 
-/** Metadata as the internal helpers take it: base, token and user id together. */
+/** 内部辅助函数要的 metadata：base、令牌、user id 放在一起。 */
 function runtimeOf(result) {
   const auth = authOf(result);
   return { ...auth.metadata, accessToken: auth.key };
 }
 
-/** The entry for one group's model, found by id suffix (the site label is the mock's host:port). */
+/** 某个分组模型的条目，按 id 后缀找（站点标识是 mock 的 host:port）。 */
 function entry(models, group, model, suffix = "") {
   const found = Object.entries(models).find(([id]) => id.endsWith(`/${group}/${model}${suffix}`));
   assert.ok(found, `no model ${group}/${model}${suffix} among ${Object.keys(models).slice(0, 10).join(", ")}`);
   return found[1];
 }
 
-/** What Magpie's host writes after a sign-in: plugin-auth.json. */
+/** Magpie 的宿主在登录之后写的文件：plugin-auth.json。 */
 function saveAuth(directory, signed) {
   const file = path.join(directory, "plugin-auth.json");
   let all = {};
@@ -48,7 +48,7 @@ function saveAuth(directory, signed) {
   fs.writeFileSync(file, JSON.stringify(all, null, 2));
 }
 
-/** Groups with no key and no failed attempt, as the metadata holds them. */
+/** 没有 key、也没有失败记录的分组，按 metadata 的存法。 */
 function pend(md) {
   return Object.entries(groupsOf(md))
     .filter(([, g]) => !g.key && !g.tried)
@@ -56,12 +56,12 @@ function pend(md) {
     .sort();
 }
 
-/** The key a group holds. */
+/** 某个分组持有的 key。 */
 function key(md, group) {
   return groupsOf(md)[group]?.key;
 }
 
-/** Groups that hold a key. */
+/** 持有 key 的那些分组。 */
 function keyed(md) {
   return Object.keys(groupsOf(md)).filter((g) => groupsOf(md)[g].key);
 }
@@ -89,7 +89,7 @@ test("sign in reveals the keys it may and names the groups it may not", async ()
     assert.equal(md.status.quotaPerUnit, 500000);
     assert.equal(md.status.checkin, true);
 
-    // Nothing is kept on disk beside the account itself.
+    // 除账号本身之外，磁盘上没有别的东西。
     assert.equal(fs.existsSync(path.join(directory, "newapi-keys.json")), false);
   } finally {
     await site.close();
@@ -126,7 +126,7 @@ test("a second sign-in keeps the keys the account had", async () => {
     const first = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupKeys: "svip=sk-pasted-svip-3" }, { directory });
     saveAuth(directory, first);
 
-    // Picking the account it just saved carries its keys over.
+    // 选中刚刚保存的那个账号，它的 key 会一并用上。
     const account = knownAccounts(directory)[0];
     const second = await signIn({ pick: account.key }, { directory });
     const md = authOf(second).metadata;
@@ -173,7 +173,7 @@ test("models carry the site, the group and a per-model protocol", async () => {
     const discovered = await discover({ md });
     const { models } = buildModels({ md, groups: discovered.groups, pricing: discovered.pricing, options: {} });
 
-    // default and vip both serve gpt-4o: two Magpie models, not one.
+    // default 和 vip 都提供 gpt-4o：是 Magpie 的两个模型，不是一个。
     const d4 = entry(models, "default", "gpt-4o");
     const v4 = entry(models, "vip", "gpt-4o");
     assert.notEqual(d4.api.id, v4.api.id);
@@ -181,11 +181,11 @@ test("models carry the site, the group and a per-model protocol", async () => {
     assert.equal(d4.api.url, `${site.base}/v1`);
     assert.equal(entry(models, "vip", "gpt-5").api.npm, "@ai-sdk/openai");
     assert.equal(entry(models, "vip", "claude-sonnet-4.5").api.npm, "@ai-sdk/anthropic");
-    // Gemini also has a chat endpoint, so chat wins by default.
+    // Gemini 也有 chat 端点，所以默认选 chat。
     assert.equal(entry(models, "vip", "gemini-2.5-pro").api.npm, "@ai-sdk/openai-compatible");
-    // An embeddings-only model is not a chat model.
+    // 只有 embeddings 的模型不是聊天模型。
     assert.equal(has(models, "default", "text-embedding-3-small"), false);
-    // svip has no key, so it lists nothing.
+    // svip 没有 key，所以列不出东西。
     assert.equal(has(models, "svip", "gpt-5"), false);
   } finally {
     await site.close();
@@ -203,7 +203,7 @@ test("exposeAllProtocols lists every protocol a model supports", async () => {
       pricing: discovered.pricing,
       options: { exposeAllProtocols: true },
     });
-    // The first protocol keeps the bare id; the second gets the suffix.
+    // 第一个协议保留裸 ID，第二个才带后缀。
     const plain = entry(models, "vip", "gpt-5");
     const chat = entry(models, "vip", "gpt-5", "@chat");
     assert.equal(plain.api.npm, "@ai-sdk/openai");
@@ -326,9 +326,8 @@ test("a refused key is not used at all", async () => {
   const site = await startNewAPI();
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    // The site turns the group's key away: the account holds one key per
-    // group, so there is no second to fall back on — the request says so
-    // instead of spending it again.
+    // 站点把这个分组的 key 拒了：账号里每个分组只有一条 key，
+    // 没有第二条可退——请求直接说明情况，而不是再花一次。
     md.groups.vip = { ratio: 0.8, key: "sk-bad-key-0000", problem: "refused" };
     const doFetch = makeFetch(async () => ({ type: "api", key: md.accessToken, metadata: md }));
     const res = await doFetch(`${site.base}/v1/chat/completions`, {
@@ -352,15 +351,14 @@ test("usage shows the balance as a wallet and spend as text", async () => {
     assert.equal(balance.unit, "$");
     assert.equal(balance.display, "$10.00 left");
     const used = usage.windows.find((w) => w.name === "Used");
-    // No `used`: a share of 0 would make Magpie draw a 0% meter and a trend
-    // for a row that is text alone.
+    // 不带 `used`：比例 0 会让 Magpie 给一行纯文本画 0% 进度条和趋势线。
     assert.equal(used.used, undefined);
     assert.match(used.display, /1,234 requests/);
     const groups = usage.windows.find((w) => w.name === "Groups");
     assert.match(groups.display, /vip/);
     const missing = usage.windows.find((w) => w.name === "Group keys");
     assert.match(missing.display, /no key: svip/);
-    // A clean read says nothing about the sign-in, which clears a lapse mark.
+    // 干净读取不提登录状态，这正好会清掉失效标记。
     assert.equal(usage.signIn, undefined);
   } finally {
     await site.close();
@@ -428,7 +426,7 @@ test("a Turnstile site is a captcha, and nothing is pressed", async () => {
     const before = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length;
     const result = await pressCheckin(md);
     assert.equal(result.outcome, "captcha");
-    // The site's own switch is the signal; a POST without a token can only fail.
+    // 站点自己的开关就是信号；不带令牌的 POST 只会失败。
     assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, before);
   } finally {
     await site.close();
@@ -505,7 +503,7 @@ test("the plugin hook answers check-in with the switch and the block", async () 
     assert.equal(saved.length, 1);
     assert.equal(saved[0].metadata.checkinBlocked, "cf");
 
-    // Marked now: no request is made.
+    // 已经标记过了：不再发请求。
     const again = await plugin.auth.checkin(async () => saved[0]);
     assert.equal(again.outcome, "captcha");
   } finally {
@@ -521,7 +519,7 @@ test("keys never appear in a sign-in result", async () => {
       { directory: tmpdir() },
     );
     assert.equal(result.type, "success");
-    // The key is kept in metadata (that is the point), and never in a message.
+    // key 存在 metadata 里（这是应该的），但绝不进消息。
     assert.ok(!String(result.error ?? "").includes("sk-secret-vip-999"));
     const usage = await buildUsage({ ...result.metadata, accessToken: result.key });
     assert.ok(!JSON.stringify(usage).includes("sk-secret-vip-999"));
@@ -530,7 +528,7 @@ test("keys never appear in a sign-in result", async () => {
   }
 });
 
-// ---- the shapes a real site (v1.0.0-rc.46) showed --------------------------
+// ---- 真实站点（v1.0.0-rc.46）呈现的形状 --------------------------------
 
 test("a legacy-only site is read and pressed on /api/user/checkin", async () => {
   const site = await startNewAPI({ legacyCheckinOnly: true, checkedInToday: false });
@@ -538,11 +536,11 @@ test("a legacy-only site is read and pressed on /api/user/checkin", async () => 
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const result = await pressCheckin(md);
     assert.equal(result.outcome, "claimed");
-    // The reward came back in the old shape (data.reward = 3000).
+    // 奖励用的是旧形状（data.reward = 3000）。
     assert.equal(result.credit, 0.006);
     const posts = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin"));
     assert.deepEqual(posts.map((r) => r.path), ["/api/user/checkin"]);
-    // The next read finds it done, still on the legacy path.
+    // 下一次读取看到已完成，仍然走老路径。
     const again = await pressCheckin(md);
     assert.equal(again.outcome, "done");
   } finally {
@@ -556,7 +554,7 @@ test("a legacy-only site with today's check-in is done, not a 404", async () => 
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const result = await pressCheckin(md);
     assert.equal(result.outcome, "done");
-    // The mock's recorded award is 5,000 quota = $0.01.
+    // mock 记录的奖励是 5,000 额度 = $0.01。
     assert.equal(result.credit, 5000 / 500000);
     assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, 0);
   } finally {
@@ -565,7 +563,7 @@ test("a legacy-only site with today's check-in is done, not a 404", async () => 
 });
 
 test("the usage card of a CNY site reads in yuan", async () => {
-  // quota_per_unit 500000, usd_exchange_rate 7.3: the shape a CNY site has.
+  // quota_per_unit 500000、usd_exchange_rate 7.3：人民币站点的形状。
   const site = await startNewAPI({ quota: 1_234_567, usedQuota: 765_432, usdExchangeRate: 7.3, quotaDisplayType: "CNY" });
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
@@ -585,7 +583,7 @@ test("a CNY check-in credit is in yuan too", async () => {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const result = await pressCheckin(md);
     assert.equal(result.outcome, "claimed");
-    // 3,000 quota = $0.006 = ¥0.0438; the credit is in the site's unit.
+    // 3,000 额度 = $0.006 = ¥0.0438；奖励按站点单位计。
     assert.equal(result.credit, 0.006 * 7.3);
     assert.match(result.message, /¥0\.04/);
   } finally {
@@ -594,7 +592,7 @@ test("a CNY check-in credit is in yuan too", async () => {
 });
 
 test("a CNY site shows its own exchange rate", () => {
-  // The real site: quota_display_type CNY, usd_exchange_rate 7.3.
+  // 真实站点：quota_display_type CNY、usd_exchange_rate 7.3。
   const info = quotaInfo({
     quota_per_unit: 500000,
     display_in_currency: true,
@@ -618,7 +616,7 @@ test("a Turnstile site is a captcha from its status, before any press", async ()
   const site = await startNewAPI({ turnstileCheck: true, legacyCheckinOnly: true });
   try {
     const auth = authOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    // The status says turnstile_check: true, so the press is skipped entirely.
+    // 状态里 turnstile_check: true，所以整个签到请求都跳过。
     assert.equal(
       auth.metadata.status.turnstile,
       true,
@@ -633,21 +631,21 @@ test("a Turnstile site is a captcha from its status, before any press", async ()
   }
 });
 
-// ---- two accounts, one label -----------------------------------------------
+// ---- 两个账号、同一个标识 ----------------------------------------------
 
 test("a second account of one site sends to its own site, not the first's", async () => {
-  // Both sites serve the same group and model names (a real pair of accounts
-  // on one New API host would). Magpie merges their model lists by id, so the
-  // entry's api.url is the first site's; the request must still go to site B.
+  // 两个站点提供相同的分组与模型名（同一台 New API 主机上的两个账号就是这样）。
+  // Magpie 按 id 合并它们的模型列表，所以条目的 api.url 是第一个站点的；
+  // 请求仍然必须发到站点 B。
   const a = await startNewAPI();
   const b = await startNewAPI();
   try {
     const mdA = runtimeOf(await signIn({ baseURL: a.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    // Same site label by hand, as a user signing the second account in may.
+    // 手工填同一个站点标识，就像用户登录第二个账号时可能会做的那样。
     const mdB = runtimeOf(await signIn({ baseURL: b.base, accessToken: ACCESS_TOKEN, siteLabel: mdA.siteLabel }, { directory: tmpdir() }));
     assert.equal(mdA.siteLabel, mdB.siteLabel, "the collision under test");
 
-    // What Magpie would build for the merged entry: site A's base and group.
+    // Magpie 为合并后的条目会拼出的地址：站点 A 的 base 与分组。
     const merged = { id: encodeURIComponent(JSON.stringify(["default", "gpt-4o"])), url: `${a.base}/v1` };
     const doFetch = makeFetch(async () => ({ type: "api", key: mdB.accessToken, metadata: mdB }));
     const res = await doFetch(`${merged.url}/chat/completions`, {
@@ -657,7 +655,7 @@ test("a second account of one site sends to its own site, not the first's", asyn
     assert.equal(res.status, 200);
     const seen = await res.json();
     assert.equal(seen.seen.model, "gpt-4o");
-    // B answered, so the request went to B and was signed with B's key.
+    // 是 B 回答的，说明请求发到了 B，而且用的是 B 的 key。
     assert.equal(b.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 1);
     assert.equal(a.state.requests.filter((r) => r.path === "/v1/chat/completions").length, 0);
     assert.equal(seen.seen.auth, DEFAULT_KEY);
@@ -671,7 +669,7 @@ test("a group the second account has no key for is not signed with another group
   const site = await startNewAPI();
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    // vip exists at the site, but this account was given no key for it.
+    // 站点上有 vip，但这个账号没有它的 key。
     delete md.groups.vip.key;
     const doFetch = makeFetch(async () => ({ type: "api", key: md.accessToken, metadata: md }));
     const res = await doFetch(`${site.base}/v1/chat/completions`, {

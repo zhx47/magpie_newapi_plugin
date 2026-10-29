@@ -1,16 +1,13 @@
-// A pre-publish check: no credential, no real site, no account detail may
-// reach the repository.
+// 发布前检查：任何凭据、真实站点、账号细节都不能进仓库。
 //
 //   npm run scan
 //
-// Exits non-zero when something looks like a secret or a real site. The test
-// fixtures it tolerates are the obvious fakes in test/mock-newapi.mjs
-// (`test-access-token-...`, `sk-default-key-...`); everything else has to be
-// clean.
+// 有像密钥或真实站点的东西就以非零退出。它容忍的测试夹具只有
+// test/mock-newapi.mjs 里那些明显的假值（`test-access-token-...`、
+// `sk-default-key-...`），其余一律必须干净。
 //
-// It also reads `.env`, when there is one, and looks for those values by
-// value: a real host or username written into a doc is caught without this
-// file holding either.
+// 它还会读 `.env`（如果存在），按**值**去全文搜索：文档里写进了真实域名或
+// 用户名就会被抓到，而本文件里不需要出现这些值。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -21,7 +18,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKIP_DIRS = new Set(["node_modules", ".git", ".live", "dist", "coverage"]);
 const SKIP_FILES = new Set([".env", ".env.local", "newapi-keys.json", "plugin-auth.json"]);
 
-/** Every text file under root, minus the ones that are not source. */
+/** 根目录下的所有文本文件，排除不是源码的那些。 */
 function* walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -37,7 +34,7 @@ function* walk(dir) {
   }
 }
 
-/** A file's lines with its line endings normalised; null when unreadable. */
+/** 文件按行切开、统一换行；读不了就返回 null。 */
 function linesOf(full) {
   let text;
   try {
@@ -48,7 +45,7 @@ function linesOf(full) {
   return text.split(/\r?\n/);
 }
 
-/** Patterns that must never appear in a tracked file. */
+/** 绝不能出现在被追踪文件里的模式。 */
 const RULES = [
   { name: "New API access token", re: /\bnap_[A-Za-z0-9_-]{16,}/ },
   { name: "OpenAI-style key", re: /\bsk-[A-Za-z0-9]{24,}/ },
@@ -60,12 +57,12 @@ const RULES = [
     name: "literal credential assignment",
     re: /\b(access[_-]?token|api[_-]?key|secret|password)\s*[:=]\s*["'][A-Za-z0-9_\-.]{20,}["']/i,
   },
-  // A real host filled into the live-script template (a dotted host only:
-  // the docs' `https://site` and `https://your-site` are placeholders).
+  // live 脚本模板里被填了真实主机（只认带点的主机名：
+  // 文档里的 `https://site` 和 `https://your-site` 是占位）。
   { name: "filled NEWAPI_BASE", re: /NEWAPI_BASE=https?:\/\/(?![a-z-]*site(?:\b|>))[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/ },
   { name: "filled NEWAPI_TOKEN", re: /NEWAPI_TOKEN=[A-Za-z0-9_-]{8,}/ },
-  // A real site label or user written into a doc: the examples are acme and
-  // example.com, everything else in backticks that looks like one is suspect.
+  // 文档里写了真实的站点标识或用户名：示例只允许 acme 和 example.com，
+  // 反引号里其他形似账号的写法都算可疑。
   { name: "an account example that is not an example", re: /`(?!(?:acme|example))[a-z0-9-]{2,20} \([A-Za-z0-9._-]+\) — [a-z0-9.-]+`/i },
   {
     name: "email address",
@@ -73,7 +70,7 @@ const RULES = [
   },
 ];
 
-/** Lines that are known-good and would otherwise match. */
+/** 已知没问题、但本来会被匹配到的行。 */
 const ALLOW = [
   /test-access-token-/,
   /sk-default-key-/,
@@ -92,7 +89,7 @@ const ALLOW = [
   /placeholder/,
 ];
 
-/** The values in .env that must never appear in a tracked file. */
+/** .env 里那些绝不能出现在被追踪文件中的值。 */
 function readLiveSecrets() {
   const out = [];
   const lines = linesOf(path.join(root, ".env"));
@@ -111,7 +108,7 @@ function readLiveSecrets() {
       try {
         out.push(new URL(value).host);
       } catch {
-        // not a URL: the raw value is already listed
+        // 不是 URL：原值已经列进去了
       }
     }
   }
@@ -141,7 +138,7 @@ for (const { full, rel } of walk(root)) {
   });
 }
 
-// The files that must not be tracked at all.
+// 完全不该被追踪的文件。
 for (const name of [".env", ".env.local"]) {
   if (!fs.existsSync(path.join(root, name))) continue;
   const ignored = linesOf(path.join(root, ".gitignore"))?.some((l) => l.trim() === name);
@@ -156,5 +153,5 @@ if (findings.length) {
 }
 
 const files = [...walk(root)].length;
-const checked = live.length ? `checked against ${live.length} value(s) from .env` : "no .env to compare";
-console.log(`clean · ${files} files scanned · ${checked}`);
+const checked = live.length ? `并对照 .env 里的 ${live.length} 个值` : "没有 .env 可比对";
+console.log(`干净 · 扫描 ${files} 个文件 · ${checked}`);

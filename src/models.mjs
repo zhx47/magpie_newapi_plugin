@@ -1,14 +1,13 @@
-// Turning a New API site into Magpie models.
+// 把 New API 站点变成 Magpie 的模型。
 //
-// A model id is `<siteLabel>/<group>/<model>`, so the same model name in two
-// groups is two models in Magpie. Each one declares its own `api.npm`,
-// which is what lets one group hold chat, Responses, Messages and Gemini
-// models side by side, and one model offer more than one of them.
+// 模型 ID 是 `<siteLabel>/<group>/<model>`，所以同一个模型名出现在两个分组里
+// 就是 Magpie 里的两个模型。每个模型各自声明 `api.npm`，正是这一点让同一个
+// 分组里能同时有 chat、Responses、Messages、Gemini 四种模型，
+// 也让一个模型可以列出多种协议。
 //
-// `api.id` encodes the group and the wire model, because every group of a
-// site shares one base URL: the plugin's fetch reads it back and puts the
-// bare model in the request. It is percent-encoded JSON so that a model name
-// with `/` or `:` cannot break Gemini's URL path.
+// `api.id` 把分组和上游模型名一起编码，因为一个站点的所有分组共用一个 base URL：
+// 插件的 fetch 把它解回来，再把裸的模型名写进请求。它是 percent-encode 过的
+// JSON，这样名字里带 `/` 或 `:` 也不会破坏 Gemini 的 URL 路径。
 
 import { chooseProtocols, isChatEndpoint, labelOf, protocolSuffix, wireId } from "./protocols.mjs";
 import { cacheKey, caches, groupsOf } from "./state.mjs";
@@ -22,36 +21,32 @@ const NPM = {
   gemini: "@ai-sdk/google",
 };
 
-/** The base URL of a protocol for this site. */
+/** 某种协议在这个站点上的 base URL。 */
 export function baseForProtocol(base, proto) {
   return proto === "gemini" ? `${base}/v1beta` : `${base}/v1`;
 }
 
 /**
- * The model's id: the site, the group and the model.
+ * 模型的 ID：站点、分组、模型。
  *
- * `<siteLabel>/<group>/<model>`, and Magpie shows it as `newapi/<that>`.
+ * `<siteLabel>/<group>/<model>`，Magpie 显示成 `newapi/<这一串>`。
  *
- * Two accounts of one site with the same label share these ids on purpose:
- * same site, same group, same model, so a second copy in the picker would be
- * a duplicate with nothing to tell it apart. Magpie merges accounts' lists by
- * id, so one row stands for both, and both stay request candidates (the
- * gateway pools a provider's accounts; a first one that fails is passed over).
- * A different site has a different label, and its same-named model is its own
- * id.
+ * 同一站点、同名的两个账号**故意**共用这些 ID：同站点、同分组、同模型，
+ * 在选择器里多一行只是重复项，没有任何东西能区分。Magpie 按 ID 合并各账号的
+ * 列表，于是一行代表两个账号，而两者都仍然是请求候选
+ * （网关把同一供应商的账号放在一个池里，第一个失败会跳过）。
+ * 不同站点用不同标识，同名模型是各自的 ID。
  */
 export function catalogId(md, group, model, proto, suffix) {
   return `${md.siteLabel}/${group}/${model}${suffix}`;
 }
 
 /**
- * The name Magpie shows: the model, the site, the group, the ratio and the
- * protocol.
+ * Magpie 显示的模型名：模型、站点、分组、倍率、协议。
  *
- * `gpt-4o · acme · vip · ×0.8`. The site label is the first id segment and
- * names the row, so a model served by two sites reads as two rows with
- * different sites, and a model served by two accounts of one site reads as
- * one row.
+ * `gpt-4o · acme · vip · ×0.8`。站点标识是 ID 的第一段，也用来标明这一行，
+ * 于是两个站点提供的同名模型显示成两行、各带自己的站点，
+ * 而同一站点两个账号提供的同一个模型只显示一行。
  */
 export function displayName(siteLabel, model, group, ratio, proto) {
   const bits = [model];
@@ -64,9 +59,9 @@ export function displayName(siteLabel, model, group, ratio, proto) {
 }
 
 /**
- * One Magpie model entry (an OpenCode Model, as `provider.models` returns).
- * `baseModel`, when the provider already had this id, gives the limits and
- * capabilities Magpie or models.dev knew.
+ * 一个 Magpie 模型条目（OpenCode Model，也就是 `provider.models` 返回的东西）。
+ * `baseModel` 是 Magpie 或 models.dev 已经知道的同 ID 条目，
+ * 提供上下文长度与能力这些默认值。
  */
 export function modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel }) {
   const apiId = wireId(group, model);
@@ -95,15 +90,15 @@ export function modelEntry({ catalogId: id, md, group, model, proto, ratio, base
 }
 
 /**
- * Fetch (and cache) everything the site says about its models: the pricing
- * square, the status, and one `/v1/models` per group key. Nothing here
- * throws for a single group: a group whose key fails is simply left out.
+ * 读取（并缓存）站点关于模型的全部信息：模型广场、状态，
+ * 以及每个分组 key 的一份 `/v1/models`。单个分组失败不抛错，
+ * 那个分组只是从结果里缺席。
  */
 export async function discover({ md, fetchImpl, signal }) {
   const base = md.baseURL;
   const token = String(md.accessToken ?? md.token ?? "");
-  // Status is decoration for the listing (balance units, check-in switches):
-  // a site that hides or breaks it must not hide the models too.
+  // 状态对列举只是装饰（额度单位、签到开关）：站点把它藏起来或弄坏，
+  // 不能因此连模型也看不到。
   let status = null;
   try {
     status = await caches.status.getOr(cacheKey(base, "status"), 10 * 60_000, () => getStatus(base, { fetchImpl, signal }));
@@ -118,8 +113,8 @@ export async function discover({ md, fetchImpl, signal }) {
   const groups = {};
   const wanted = parseGroupFilter(md.groupFilter);
   const groupsMap = groupsOf(md);
-  // Only a group with a usable key can list its models by key; the ones
-  // without are filled from the account-scoped list below.
+  // 只有持有可用 key 的分组才能用 key 列模型；没有 key 的由下面的
+  // 账号级列表补上。
   const names = Object.keys(groupsMap).filter(
     (g) => (!wanted.length || wanted.includes(g)) && groupsMap[g].key && !groupsMap[g].problem,
   );
@@ -133,13 +128,13 @@ export async function discover({ md, fetchImpl, signal }) {
         );
         if (models.length) groups[group] = sortGroups([...(groups[group] ?? []), ...models]);
       } catch {
-        // the key is dead: the sync marks it, and the group stays out here
+        // key 已失效：同步会标出来，这里先跳过这个分组
       }
     }),
   );
 
-  // No key at all: the site's account-scoped list still says which models
-  // each group would serve, so the user sees what to paste a key for.
+  // 一个 key 都没有时，站点的账号级列表仍然能说明每个分组会提供什么模型，
+  // 用户就知道该为哪个分组补 key。
   const siteGroups = Object.keys(md.groups ?? {});
   const noKeys = names.length === 0 && siteGroups.length > 0;
   if (noKeys) {
@@ -150,14 +145,13 @@ export async function discover({ md, fetchImpl, signal }) {
         );
         if (models.length) groups[group] = sortGroups(models);
       } catch {
-        // that group stays out this time
+        // 这个分组这次先不列
       }
     }
   }
 
-  // No key answered for a group: fall back to the account-scoped list, which
-  // does not need a relay key, so the group is still visible (with a warning
-  // in the usage card that it has no key).
+  // 某个分组没有 key 能回答：退回账号级列表——它不需要推理 key，
+  // 所以分组仍然可见（用量卡片会提示它没有 key）。
   const missing = names.filter((g) => !groups[g]);
   if (missing.length) {
     try {
@@ -166,23 +160,22 @@ export async function discover({ md, fetchImpl, signal }) {
       );
       if (all.length) {
         for (const group of missing) {
-          // /api/user/models with no group is the union of every usable
-          // group; it cannot say which one, so it only fills a group the
-          // user pasted a key for and whose key call failed.
+          // 不带 group 的 /api/user/models 是所有可用分组的并集，
+          // 它说不出是哪一个，所以只用来填「用户贴了 key、但那次请求失败」
+          // 的分组。
           groups[group] = sortGroups(all);
         }
       }
     } catch {
-      // still nothing: the group has no models this time
+      // 还是没有：这个分组这次没有模型
     }
   }
 
   return { status, pricing, groups };
 }
 /**
- * `/v1/models` for a group key, retried once when the connection itself
- * failed: a dropped socket must not hide a whole group's models for the
- * cache's lifetime.
+ * 用分组 key 调 `/v1/models`，连接本身失败时重试一次：
+ * 一次掉线不该让整个分组的模型在整个缓存周期里都看不见。
  */
 async function listModelsWithRetry(base, key, opts) {
   try {
@@ -193,14 +186,14 @@ async function listModelsWithRetry(base, key, opts) {
   }
 }
 
-/** The endpoint types a model supports, from pricing (empty when unknown). */
+/** 模型支持的端点类型，来自模型广场（不知道时为空）。 */
 function endpointsOf(pricing, model) {
   return pricing?.models?.get(String(model).toLowerCase())?.endpoints ?? [];
 }
 
 /**
- * Every model of every group as Magpie entries, keyed by catalog id.
- * `options` are the plugin's switches.
+ * 所有分组的全部模型，转成 Magpie 条目，按 catalog id 索引。
+ * `options` 是插件的那些开关。
  */
 export function buildModels({ md, groups, pricing, options = {} }) {
   const out = {};
@@ -217,15 +210,15 @@ export function buildModels({ md, groups, pricing, options = {} }) {
     const ratio = groupRatio[group] ?? ratioByGroup[group] ?? 0;
     for (const model of models) {
       const endpoints = endpointsOf(pricing, model);
-      // A model that only speaks embeddings, images, video or rerank is not
-      // a chat model: Magpie would have nothing to send it.
+      // 只会 embeddings、图片、视频或 rerank 的模型不是聊天模型：
+      // Magpie 没有东西可以发给它。
       if (endpoints.length && !endpoints.some(isChatEndpoint)) continue;
 
       const protos = chooseProtocols(endpoints, model, options);
       for (let i = 0; i < protos.length; i++) {
         const proto = protos[i];
-        // The first protocol keeps the bare id, so turning the extra-protocol
-        // switch on never invalidates a pick an agent already saved.
+        // 第一个协议保留不带后缀的 ID，这样打开「列出所有协议」开关
+        // 也不会让 agent 已经存下的选择失效。
         const suffix = i === 0 ? "" : protocolSuffix(proto);
         const id = catalogId(md, group, model, proto, suffix);
         const baseModel = options.hostModels?.[catalogId(md, group, model, proto, "")];

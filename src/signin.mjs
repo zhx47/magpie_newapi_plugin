@@ -1,20 +1,16 @@
-// Signing in: what happens when the user types a base URL and an access
-// token.
+// 登录：用户输入站点地址和访问令牌之后发生的事。
 //
-// New API splits credentials in two: the dashboard access token (rights to
-// /api/*) and per-group API keys (the `sk-...` a relay request carries).
-// This hook collects both:
-//   - the token, for the account's identity, balance and check-in;
-//   - every group key it can find or reveal;
-//   - then, group by group, whatever is still missing, one question each.
+// New API 把凭据分成两种：后台的访问令牌（/api/* 的权限）和各分组的 API key
+// （推理请求带的那个 `sk-...`）。这个钩子把两者都收上来：
+//   - 令牌，用来认账号、读余额、签到；
+//   - 它能找到或 reveal 出来的每个分组 key；
+//   - 然后逐个分组问还缺的那些，一个分组一个问题。
 //
-// The questions are Magpie's `ask(inputs)` hook on the method: it may look
-// things up between questions, so the groups can be read from the site
-// first and each one asked by name instead of one text field to splice.
+// 这些问题是 Magpie 的 `ask(inputs)` 钩子：它可以在两次提问之间去查询，
+// 所以能先从站点读出分组，再按名字逐个问，而不是让人在一个文本框里拼。
 //
-// It never fails because a management endpoint is closed: a site whose
-// /api/pricing is root-only still signs in, and its models come from
-// /v1/models. It only fails when the access token itself is refused.
+// 管理接口关着不会让登录失败：/api/pricing 只对管理员开放的站点照样能登录，
+// 模型从 /v1/models 拿。只有访问令牌本身被拒才算失败。
 
 import {
   createToken,
@@ -40,25 +36,26 @@ import {
 } from "./util.mjs";
 import { TtlCache, cacheKey, groupsOf, knownAccounts } from "./state.mjs";
 import { checkKey, createKey } from "./sync.mjs";
+import { t } from "./i18n.mjs";
 
 const PROVIDER = "newapi";
 
-/** Validate the base URL prompt, in Magpie's prompt style (message or undefined). */
+/** 校验站点地址这一问，按 Magpie 的 prompt 约定：返回错误消息或不返回。 */
 export function validateBase(value) {
   const base = normalizeBase(value);
-  if (!base) return "Enter an http(s) URL, e.g. https://newapi.example.com";
+  if (!base) return t("Enter an http(s) URL, e.g. https://newapi.example.com");
   return undefined;
 }
 
-/** The access token prompt: a JWT or an opaque token, never an sk- key. */
+/** 访问令牌这一问：JWT 或不透明令牌，绝不是 sk- 开头的推理 key。 */
 export function validateAccessToken(value) {
   const s = String(value ?? "").trim();
-  if (!s) return "Enter the site's access token (not an sk- API key)";
-  if (/^sk-/i.test(s)) return "That is a relay API key. Use the access token from the site's account settings.";
+  if (!s) return t("Enter the site's access token (not an sk- API key)");
+  if (/^sk-/i.test(s)) return t("That is a relay API key. Use the access token from the site's account settings.");
   return undefined;
 }
 
-/** Every token usable for relay, grouped by the group it serves. */
+/** 所有还能用于推理的 token，按它服务的分组归类。 */
 export function tokensByGroup(tokens, defaultGroupName) {
   const out = {};
   for (const t of tokens) {
@@ -68,29 +65,29 @@ export function tokensByGroup(tokens, defaultGroupName) {
   }
   return out;
 }
-/** A token name to find a created token again by. */
+/** 新建 token 用的名字，便于之后按名字找回来。 */
 function tokenName(label, group, stamp) {
   const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
   return `magpie-${cleanLabel(label, "site")}-${safe}-${stamp}`.slice(0, 50);
 }
 
-// The questions run one per call, and each needs the site's groups: without
-// this, a sign-in with three missing groups read six endpoints four times.
+// 提问是一次调用问一个，每次都要站点分组：没有这层缓存，
+// 三个分组缺失的登录会把六个端点读四遍。
 const surveys = new TtlCache(60_000);
 
-/** What the first calls found out: used by the questions and the result alike. */
+/** 最初几次调用查到的东西：提问和最终结果都用它。 */
 async function surveyOnce(inputs, fetchImpl) {
   const base = normalizeBase(inputs?.baseURL);
   const token = String(inputs?.accessToken ?? "").trim();
   const userId = String(inputs?.userId ?? "").trim();
-  if (!base) return { failed: "Enter the site's base URL, e.g. https://newapi.example.com" };
-  if (!token) return { failed: "Enter the site's access token (not an sk- API key)" };
+  if (!base) return { failed: t("Enter an http(s) URL, e.g. https://newapi.example.com") };
+  if (!token) return { failed: t("Enter the site's access token (not an sk- API key)") };
 
   let status = null;
   try {
     status = await getStatus(base, { fetchImpl, timeout: 8000 });
   } catch {
-    // status is decoration: a site that hides it still works
+    // 状态只是装饰：站点不返回它也能用
   }
 
   let self;
@@ -101,13 +98,14 @@ async function surveyOnce(inputs, fetchImpl) {
     if (isAuthError(e)) {
       return {
         failed: userId
-          ? `The site refused the access token (${describe(e)}). Check the token, and the user id.`
-          : `The site refused the access token (${describe(e)}). Older New API needs your user id — fill the User id field.`,
+          ? t("The site refused the access token ({why}). Check the token, and the user id.", { why: describe(e) })
+          : t("The site refused the access token ({why}). Older New API needs your user id — fill the User id field.", {
+              why: describe(e),
+            }),
       };
     }
-    // A network blip must not lose the sign-in: keep what the user typed and
-    // let the next listing fail loudly instead. A site that cannot be reached
-    // at all is different: nothing about the token was checked.
+    // 网络抖动不能让登录白填：保住用户敲的内容，让下一次列举去报错。
+    // 完全连不上的站点是另一回事：关于令牌什么都没验证到。
     unreachable = e?.status === 0;
     self = { id: Number(userId) || 0, username: "", group: "", quota: 0, usedQuota: 0, requestCount: 0 };
   }
@@ -127,7 +125,7 @@ async function surveyOnce(inputs, fetchImpl) {
     revealed = new Map();
   }
 
-  // The newest usable token of each group, with its key when readable.
+  // 每个分组最新的一条可用 token，能读到就带上它的 key。
   const fromTokens = {};
   for (const [group, list] of Object.entries(byGroup)) {
     const newest = [...list].sort((a, b) => b.id - a.id)[0];
@@ -138,7 +136,7 @@ async function surveyOnce(inputs, fetchImpl) {
   return { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens };
 }
 
-/** survey, kept for a minute under the answers it was made from. */
+/** survey 的结果按它的输入缓存一分钟。 */
 function survey(inputs, fetchImpl) {
   const base = normalizeBase(inputs?.baseURL);
   const token = String(inputs?.accessToken ?? "").trim();
@@ -148,9 +146,8 @@ function survey(inputs, fetchImpl) {
 }
 
 /**
- * The keys a sign-in has so far, as one map of group → key: what the site
- * handed over, what a creation step made, what the user pasted, and — for a
- * picked account — the keys it already held.
+ * 这次登录到目前为止拿到的 key，一张「分组 → key」的表：
+ * 站点给的、创建步骤建的、用户贴的，以及——选中已有账号时——它本来持有的。
  */
 export function keysSoFar(found, inputs, picked) {
   const out = { ...found.fromTokens };
@@ -174,7 +171,7 @@ export function keysSoFar(found, inputs, picked) {
     if (k) legacy[group] = k;
   }
 
-  // Later sources win: a key typed by hand beats one the site offered.
+  // 后面的来源覆盖前面的：手填的 key 胜过站点给的。
   for (const src of [fromPick, createdKeys(inputs), pasted, legacy]) {
     for (const [group, key] of Object.entries(src)) {
       if (key) out[group] = key;
@@ -183,7 +180,7 @@ export function keysSoFar(found, inputs, picked) {
   return out;
 }
 
-/** The groups a site serves that still need a key, in the order they are asked. */
+/** 站点提供、还缺 key 的分组，按提问顺序。 */
 function pendingGroupsOf(found, inputs, keys) {
   const filter = parseGroupFilter(inputs?.groupFilter);
   const names = Object.keys(found.groups ?? {});
@@ -192,14 +189,13 @@ function pendingGroupsOf(found, inputs, keys) {
 }
 
 /**
- * The questions after the first three, as Magpie asks them one at a time.
- * Each missing group is its own field, titled with its name; asking again
- * asks the one after it, since a question answered is passed back in.
+ * 开头几问之后的问题，Magpie 一次问一个。
+ * 每个缺 key 的分组各占一个输入框，标题就是分组名；已回答的问题会传回来，
+ * 所以再问一次就是问下一个。
  */
 export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
-  // An account Magpie already holds needs no token typed from memory: the
-  // first question offers the sites this plugin is signed in to, and picking
-  // one answers the base URL, the token, the user id and the label at once.
+  // Magpie 已经有的账号不需要凭记忆重敲令牌：第一问就把本插件登录过的站点
+  // 列出来，选中一个就等于回答了站点地址、令牌、user id 和标识。
   inputs = resolvePick(inputs, directory);
   if (!inputs?.baseURL && inputs?.pick === undefined) {
     const known = knownAccounts(directory);
@@ -207,20 +203,20 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
       return {
         type: "select",
         key: "pick",
-        message: "Which account? Picking one reuses the access token Magpie already has.",
+        message: t("Which account? Picking one reuses the access token Magpie already has."),
         options: [
           ...known.map((a) => ({
             label: `${a.accountId} — ${a.base.replace(/^https?:\/\//, "")}`,
             value: a.key,
-            hint: `${a.groups.length} group${a.groups.length === 1 ? "" : "s"} · ${a.checkin === "off" ? "check-in off" : "check-in on"}`,
+            hint: `${a.groups.length} · ${a.checkin === "off" ? t("Auto check-in off · check in on the site") : t("Daily check-in")}`,
           })),
-          { label: "Another site (paste its access token)", value: NEW_SITE },
+          { label: t("Another site (paste its access token)"), value: NEW_SITE },
         ],
       };
     }
   }
 
-  // The first questions need no lookup.
+  // 开头几问不需要查询。
   if (!inputs?.baseURL) return prompt("baseURL");
   if (!inputs?.accessToken) return prompt("accessToken");
   if (inputs?.userId === undefined) return prompt("userId");
@@ -228,8 +224,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
 
   const found = await survey(inputs, fetchImpl);
   if (found.failed) {
-    // A bad token: ask it again rather than going on to questions that
-    // cannot be answered without one.
+    // 令牌不行：再问一遍，别继续问那些没有令牌根本答不了的问题。
     return { ...prompt("accessToken"), message: `${found.failed}\nAccess token` };
   }
 
@@ -238,8 +233,8 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   const autoCreate = inputs?.autoCreate;
   const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
 
-  // A site with a handful of groups needs no filter question; one with many
-  // does, or every group is a model namespace in the picker.
+  // 只有几个分组的站点不用问过滤；分组多的必须问，
+  // 否则每个分组都是选择器里的一个模型命名空间。
   if (allGroups > 6 && inputs?.groupFilter === undefined) {
     return {
       type: "text",
@@ -249,8 +244,8 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
-  // Creation comes first: a token the site makes needs no typing, so only
-  // what it cannot produce should be asked for by hand.
+  // 先试创建：站点自己建的 token 不用人打字，
+  // 只有它给不出来的才该让人手填。
   if (pending.length && autoCreate === undefined) {
     const names = pending.join(", ");
     return {
@@ -266,8 +261,8 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
-  // Creating takes a request per group, so it happens once: the answer says
-  // what came of it, and the next call reads that from `createdKeys`.
+  // 创建每个分组都要一个请求，所以只做一次：答案里带上结果，
+  // 下一次调用从 `createdKeys` 读它。
   if (pending.length && autoCreate === "yes" && typeof inputs?.[CREATED] !== "string") {
     const created = {};
     const made = [];
@@ -299,16 +294,15 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
-  // What the site would not produce, one group at a time. The answer is kept
-  // under groupkey:<group>, so a group already answered is not asked again.
+  // 站点给不出来的，逐个分组问。回答存在 groupkey:<分组> 下，
+  // 已经问过的分组不会再问。
   if (autoCreate !== "yes" || pending.length) {
     for (const group of pending) {
       const at = inputKey(group);
       if (typeof inputs?.[at] === "string") continue;
 
-      // A key typed on an earlier pass is checked before the next question:
-      // the site is the only thing that can say whether it works, and a
-      // refused one is asked again rather than carried into the account.
+      // 之前某轮填的 key 先校验再问下一题：只有站点能说它行不行，
+      // 被拒的就再问一次，而不是带进账号里。
       for (const [key, value] of Object.entries(inputs ?? {})) {
         if (!key.startsWith("groupkey:") || !value) continue;
         const forGroup = key.slice("groupkey:".length);
@@ -339,36 +333,36 @@ const FIRST_PROMPTS = {
   baseURL: {
     type: "text",
     key: "baseURL",
-    message: "New API base URL",
+    message: t("New API base URL"),
     placeholder: "https://newapi.example.com",
     validate: validateBase,
   },
   accessToken: {
     type: "password",
     key: "accessToken",
-    message: "Access token",
-    placeholder: "the site's access token (not an sk- key)",
+    message: t("Access token"),
+    placeholder: t("Enter the site's access token (not an sk- API key)"),
     validate: validateAccessToken,
   },
   userId: {
     type: "text",
     key: "userId",
-    message: "User id (old New API only; leave empty)",
+    message: t("User id (old New API only; leave empty)"),
     placeholder: "1",
   },
   siteLabel: {
     type: "text",
     key: "siteLabel",
-    message: "Site label (the model prefix; empty uses the host)",
+    message: t("Site label (the model prefix; empty uses the host)"),
     placeholder: "example",
   },
   checkin: {
     type: "select",
     key: "checkin",
-    message: "Daily check-in",
+    message: t("Daily check-in"),
     options: [
-      { label: "Automatic", value: "auto" },
-      { label: "Off (check in on the site yourself)", value: "off" },
+      { label: t("Automatic"), value: "auto" },
+      { label: t("Off (check in on the site yourself)"), value: "off" },
     ],
   },
 };
@@ -377,21 +371,21 @@ function prompt(key) {
   return { ...FIRST_PROMPTS[key] };
 }
 
-/** The input key a group's pasted key is kept under. */
+/** 某个分组手填的 key 存在哪个输入键下。 */
 export function inputKey(group) {
   return `groupkey:${group}`;
 }
 
-/** Where the answer to "let the site create the keys" keeps what it made. */
+/** 「让站点创建 key」那一问，把建出来的东西存在这里的回答下。 */
 export const CREATED = "createdKeys";
 
-/** The pick answer that means "a site this plugin has not been signed in to". */
+/** 表示「这个插件还没登录过的站点」的那个选择值。 */
 export const NEW_SITE = "__new__";
 
 /**
- * The answers a picked account supplies: its base, its token and its
- * label, as the sign-in Magpie holds has them. An answer the user typed
- * wins, so a picked account can still be pointed at another token.
+ * 选中一个已有账号时它给出的答案：站点地址、令牌、标识，
+ * 就按 Magpie 保存的那份。用户自己敲的答案优先，
+ * 所以选中的账号也能指向另一个令牌。
  */
 export function resolvePick(inputs, directory) {
   const pick = inputs?.pick;
@@ -407,7 +401,7 @@ export function resolvePick(inputs, directory) {
   };
 }
 
-/** What the "let the site create them" step made: group → key. */
+/** 「让站点创建 key」那一步建出来的：分组 → key。 */
 export function createdKeys(inputs) {
   const raw = inputs?.[CREATED];
   if (typeof raw !== "string" || !raw) return {};
@@ -424,7 +418,7 @@ export function createdKeys(inputs) {
   }
 }
 
-/** The keys pasted in the per-group questions: group → key. */
+/** 在逐个分组的问题里填的 key：分组 → key。 */
 export function pastedKeys(inputs) {
   const out = {};
   for (const [key, value] of Object.entries(inputs ?? {})) {
@@ -437,8 +431,8 @@ export function pastedKeys(inputs) {
 }
 
 /**
- * The whole sign-in. `directory` is Magpie's config dir, where the key
- * cache lives.
+ * 完整的登录。`directory` 是 Magpie 的配置目录，
+ * 已保存的账号就是从这里读的。
  */
 export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
   const inputs = resolvePick(rawInputs, directory);
@@ -453,16 +447,16 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
 
   const keys = keysSoFar(found, inputs, picked);
 
-  // A filter names the groups the user wants; a key for a group outside it is
-  // left out with the rest, so the account holds only what was asked for.
+  // 过滤器指明用户要哪些分组；不在其中的 key 一并丢掉，
+  // 账号里只留用户要的。
   if (filter.length) {
     for (const group of Object.keys(keys)) {
       if (!filter.includes(group)) delete keys[group];
     }
   }
 
-  // The groups the site knows, plus any the picked account had that this
-  // run did not see (one of the site's endpoints may be closed).
+  // 站点认识的分组，加上选中的账号有、但这一轮没看到的
+  // （站点的某个接口可能关着）。
   const known = new Set([
     ...Object.keys(groups ?? {}),
     ...Object.keys(keys),
@@ -470,8 +464,7 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
   ]);
   const siteGroups = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
 
-  // A caller that answered yes without going through the questions (the CLI,
-  // a server) creates them here.
+  // 没走问答就直接答 yes 的调用方（命令行、服务器）在这里创建。
   if (inputs?.autoCreate === "yes" && !Object.keys(createdKeys(inputs)).length) {
     for (const group of sortGroups(siteGroups.filter((g) => !keys[g]))) {
       const key = await createKey({ base, token, userId, label, group, tokens, fetchImpl }).catch(() => undefined);
@@ -479,16 +472,16 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     }
   }
 
-  // Nothing could be reached and nothing was pasted: this is not a sign-in.
+  // 什么都连不上、也没填任何 key：这不算登录成功。
   if (unreachable && !Object.keys(keys).length) {
     return {
       type: "failed",
-      error: `Could not reach ${base}. Check the URL and the network, then sign in again.`,
+      error: t("Could not reach {base}. Check the URL and the network, then sign in again.", { base }),
     };
   }
 
-  // One map for the account: every group the site serves, with its ratio, its
-  // key, and — when there is one — what is wrong with the key.
+  // 账号就一张表：站点提供的每个分组，带倍率、key，
+  // 以及（如果有）key 的问题。
   const groupsMap = {};
   const had = picked ? groupsOf(picked.metadata) : {};
   for (const name of sortGroups([...siteGroups, ...Object.keys(keys)])) {
@@ -499,9 +492,8 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     const desc = String(info.desc ?? had[name]?.desc ?? "");
     if (desc) entry.desc = desc;
     if (keys[name]) entry.key = keys[name];
-    // The key the picked account had is the one that was refused before: the
-    // sign-in just gave it another chance, so its verdict stands until the
-    // next sync checks it again.
+    // 选中的账号原来那条 key 就是之前被拒的那条：这次登录给了它一次机会，
+    // 于是判定保留到下一次同步再校验。
     else if (had[name]?.problem) entry.problem = had[name].problem;
     groupsMap[name] = entry;
   }

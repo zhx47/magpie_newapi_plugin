@@ -1,50 +1,50 @@
-// The daily check-in, and the switches around it.
+// 每日签到，以及围绕它的开关。
 //
-// Some New API sites protect their check-in endpoint with Cloudflare
-// Turnstile or a managed challenge. An access token does not get past
-// those: they need a browser. The plugin therefore:
-//   - lets each site turn automatic check-in off at sign-in (`checkin=off`);
-//   - detects a challenge and marks the account, so later days return
-//     `captcha` without spending a request;
-//   - never solves or bypasses a challenge.
-// Magpie's own per-account "Daily check-in" switch still governs whether
-// the hook runs at all.
+// 有些 New API 站点给签到接口加了 Cloudflare Turnstile 或托管质询。
+// 访问令牌过不去——那需要浏览器。所以插件：
+//   - 允许登录时给每个站点关掉自动签到（`checkin=off`）；
+//   - 检测到质询就把账号标出来，之后的日子直接返回 `captcha`，
+//     不再白花请求；
+//   - 绝不破解或绕过任何质询。
+// Magpie 自己那个按账号的「每日签到」开关仍然决定这个钩子跑不跑。
 
 import { ChallengeError, getCheckinStatus, postCheckin, challengeKind } from "./api.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "./util.mjs";
+import { t } from "./i18n.mjs";
 
-const CAPTCHA_MESSAGE = {
+/** 签到被质询拦下时的文案，键与 outcomes 的 captcha 对应。 */
+const CAPTCHA_KEY = {
   cf: "This site asks for a Cloudflare challenge. Check in on its website.",
   turnstile: "This site asks for a captcha. Check in on its website.",
 };
 
-/** What the hook says when auto check-in is off for the site. */
+/** 站点关掉了自动签到时，钩子回答什么。 */
 export function offResult() {
   return {
     outcome: "inactive",
-    message: "Auto check-in is off for this site. Check in on the site itself.",
+    message: t("Auto check-in is off for this site. Check in on the site itself."),
   };
 }
 
-/** What the hook says when a challenge was seen before. */
+/** 之前见过质询时，钩子回答什么。 */
 export function blockedResult(kind) {
   return {
     outcome: "captcha",
-    message: CAPTCHA_MESSAGE[kind] ?? CAPTCHA_MESSAGE.cf,
+    message: t(CAPTCHA_KEY[kind] ?? CAPTCHA_KEY.cf),
   };
 }
 
 /**
- * A challenge as the hook's answer. Cloudflare's blocking page is marked (the
- * caller stores it, so the next day costs one request less); a Turnstile
- * token requirement is not, since a site setting can change.
+ * 把质询变成钩子的回答。Cloudflare 的拦截页会被记下来
+ * （调用方存它，第二天的请求就能少一次）；要求 Turnstile 令牌的不记，
+ * 因为站点设置随时会变。
  */
 function challengeResult(kind) {
-  const message = CAPTCHA_MESSAGE[kind] ?? CAPTCHA_MESSAGE.cf;
+  const message = t(CAPTCHA_KEY[kind] ?? CAPTCHA_KEY.cf);
   return kind === "cf" ? { outcome: "captcha", message, blocked: "cf" } : { outcome: "captcha", message };
 }
 
-/** The account parts the check-in needs: base, access token and user id. */
+/** 签到需要的账号要素：base、访问令牌、user id。 */
 function partsOf(md) {
   return {
     base: String(md?.baseURL ?? md?.base ?? ""),
@@ -53,15 +53,15 @@ function partsOf(md) {
   };
 }
 
-/** Read the check-in state without pressing it. */
+/** 只读签到状态，不按下去。 */
 export async function checkinState(md, opts = {}) {
   const { base, token, userId } = partsOf(md);
   return withTransportRetry(() => getCheckinStatus(base, token, userId, opts));
 }
 
 /**
- * Re-run a read that failed because the connection itself failed (status 0:
- * a dropped socket, a DNS blip). A site's own "no" is never retried.
+ * 连接本身失败（status 0：掉线、DNS 抖动）时再读一次。
+ * 站点自己说的「不行」绝不重试。
  */
 async function withTransportRetry(fn) {
   try {
@@ -73,13 +73,12 @@ async function withTransportRetry(fn) {
 }
 
 /**
- * Press the check-in. Returns the Magpie check-in result plus, when the
- * site asked for a challenge, `blocked: "cf"|"turnstile"` so the caller can
- * mark the account.
+ * 按下签到。返回 Magpie 要的签到结果；站点要求质询时额外带
+ * `blocked: "cf"|"turnstile"`，让调用方去标记账号。
  */
 export async function pressCheckin(md, opts = {}) {
   const { base, token, userId } = partsOf(md);
-  if (!base || !token) return { outcome: "failed", message: "not signed in" };
+  if (!base || !token) return { outcome: "failed", message: t("not signed in") };
 
   const info = quotaInfo({
     quota_per_unit: md.status?.quotaPerUnit,
@@ -95,29 +94,30 @@ export async function pressCheckin(md, opts = {}) {
     state = await checkinState(md, opts);
   } catch (e) {
     if (e instanceof ChallengeError) {
-      return { outcome: "captcha", message: CAPTCHA_MESSAGE[e.code] ?? CAPTCHA_MESSAGE.cf, blocked: e.code };
+      return challengeResult(e.code);
     }
     const kind = challengeKind(e);
-    if (kind) return { outcome: "captcha", message: CAPTCHA_MESSAGE[kind], blocked: kind };
+    if (kind) return challengeResult(kind);
     throw e;
   }
   if (!state.enabled) {
-    return { outcome: "inactive", message: "Check-in is not enabled on this site" };
+    return { outcome: "inactive", message: t("Check-in is not enabled on this site") };
   }
   if (state.checkedInToday) {
     const credit = state.records?.[0]?.quota_awarded;
     return {
       outcome: "done",
       credit: credit ? quotaAsNumber(credit, info) : 0,
-      message: credit ? `Already checked in today · +${formatQuota(credit, info)}` : "Already checked in today",
+      message: credit
+        ? t("Already checked in today · +{credit}", { credit: formatQuota(credit, info) })
+        : t("Already checked in today"),
     };
   }
-  // The site says its check-in wants a Turnstile token: pressing it without
-  // one can only be refused, so don't spend the request. Only a Cloudflare
-  // challenge (a blocking page) is remembered: a site can turn Turnstile off,
-  // and the next day's read sees that.
+  // 站点说它的签到需要 Turnstile 令牌：不带令牌按下去只会被拒，
+  // 那就别花这个请求。只有 Cloudflare 拦截页会被记住：
+  // 站点可能把 Turnstile 关掉，第二天读一次就知道了。
   if (md.status?.turnstile) {
-    return { outcome: "captcha", message: CAPTCHA_MESSAGE.turnstile };
+    return { outcome: "captcha", message: t(CAPTCHA_KEY.turnstile) };
   }
 
   let result;
@@ -135,17 +135,17 @@ export async function pressCheckin(md, opts = {}) {
     return {
       outcome: "claimed",
       credit: awarded ? quotaAsNumber(awarded, info) : 0,
-      message: awarded ? `Checked in · +${formatQuota(awarded, info)}` : "Checked in",
+      message: awarded ? t("Checked in · +{credit}", { credit: formatQuota(awarded, info) }) : t("Checked in"),
     };
   }
 
   const message = String(result.message ?? "").trim();
   if (/already checked in|今天已签到|已签到/i.test(message)) return { outcome: "done", message };
   if (/not enabled|disabled|未开启/i.test(message)) return { outcome: "inactive", message };
-  // A Turnstile refusal is the site's switch, not a new discovery: report it
-  // without marking the account (see the status check above).
+  // Turnstile 拒绝是站点自己的开关，不是新发现：如实报告，
+  // 但不标记账号（理由见上面的状态检查）。
   if (/turnstile|captcha|verification failed|验证/i.test(message)) {
-    return { outcome: "captcha", message: message || CAPTCHA_MESSAGE.turnstile };
+    return { outcome: "captcha", message: message || t(CAPTCHA_KEY.turnstile) };
   }
-  return { outcome: "failed", message: message || "check-in failed" };
+  return { outcome: "failed", message: message || t("check-in failed") };
 }

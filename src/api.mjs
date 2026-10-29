@@ -1,20 +1,20 @@
-// New API's HTTP surface: the envelope ({success, message, data}), the
-// management endpoints (user, groups, pricing, tokens, check-in) and the
-// relay endpoints (models, chat, responses, messages, gemini).
+// New API 的 HTTP 接口：统一信封（{success, message, data}）、
+// 管理接口（用户、分组、定价、令牌、签到）和推理接口
+// （models、chat、responses、messages、gemini）。
 //
-// New API answers most management failures with HTTP 200 and
-// {success:false, message}, so nothing here trusts the status alone.
+// New API 大多数管理类失败都用 HTTP 200 + {success:false, message} 回答，
+// 所以这里从不只看状态码。
 
 import { fetchWithTimeout, joinURL } from "./util.mjs";
+import { t } from "./i18n.mjs";
 
-// Magpie gives a provider's whole models hook 20s (gui/providers.go's
-// Refetch). A single request must never be allowed to eat all of it, or the
-// listing fails with "context deadline exceeded" instead of showing the list
-// it could have shown.
+// Magpie 给一个供应商的整个模型钩子只有 20 秒（gui/providers.go 的 Refetch）。
+// 单个请求绝不能吃掉全部，否则列举会以 "context deadline exceeded" 失败，
+// 而不是把本来能拿到的列表显示出来。
 const DEFAULT_TIMEOUT = 8000;
 const LIST_TIMEOUT = 10000;
 
-/** An error that carries the HTTP status and the site's own message. */
+/** 带 HTTP 状态码和站点原话的错误。 */
 export class ApiError extends Error {
   constructor(message, { status = 0, code = "", url = "", body = "" } = {}) {
     super(message);
@@ -26,14 +26,14 @@ export class ApiError extends Error {
   }
 }
 
-/** Whether an error means the access token itself is refused. */
+/** 这个错误是否表示访问令牌本身被拒绝。 */
 export function isAuthError(err) {
   return err instanceof ApiError && (err.status === 401 || err.status === 403);
 }
 
 /**
- * Whether an error is a Cloudflare / Turnstile challenge: the site wants a
- * browser. Nothing here tries to get past one.
+ * 这个错误是否是 Cloudflare / Turnstile 质询：站点要一个浏览器。
+ * 这里绝不尝试绕过。
  */
 export function challengeKind(err) {
   if (err?.code === "cf") return "cf";
@@ -45,7 +45,7 @@ export function challengeKind(err) {
   return "";
 }
 
-/** A challenge as an error, so every caller handles it the same way. */
+/** 把质询表示成错误，让每个调用方用同一种方式处理。 */
 export class ChallengeError extends ApiError {
   constructor(kind, message, details = {}) {
     super(message || (kind === "turnstile" ? "the site asks for a Turnstile token" : "the site asks for a Cloudflare challenge"), {
@@ -70,7 +70,7 @@ function looksLikeChallenge(res, text) {
   return "";
 }
 
-/** The message New API puts in an envelope, or a short form of the body. */
+/** New API 信封里的消息；没有就取正文的短形式。 */
 function envelopeMessage(payload, text) {
   if (payload && typeof payload === "object") {
     const m = payload.message ?? payload.error?.message ?? payload.msg ?? payload.detail;
@@ -82,19 +82,19 @@ function envelopeMessage(payload, text) {
 }
 
 /**
- * One request against a New API site.
+ * 向 New API 站点发一个请求。
  *
- * `token` goes as the Authorization bearer (management endpoints).
- * `apiKey` goes the way the relay endpoint reads it (Bearer, x-api-key or
- * x-goog-api-key), chosen per endpoint.
- * `userId` is sent as New-Api-User when known, for the versions that need it.
+ * `token` 作为 Authorization bearer 发出（管理接口）。
+ * `apiKey` 按目标推理接口读的方式发出（Bearer、x-api-key 或 x-goog-api-key），
+ * 由接口决定。
+ * `userId` 在知道时作为 New-Api-User 发出，给需要它的老版本用。
  */
 export async function newapiFetch(base, path, options = {}) {
   try {
     return await newapiFetchOnce(base, path, options);
   } catch (e) {
-    // A connection that dropped before the site answered says nothing about
-    // the site: try once more. A response, however bad, is final.
+    // 站点还没回答连接就断了，说明不了站点怎样：再试一次。
+    // 只要收到回答，无论多糟，都是最终结果。
     if (e instanceof ApiError && e.status === 0 && options.retry !== false) {
       await new Promise((r) => setTimeout(r, 150));
       return newapiFetchOnce(base, path, { ...options, retry: false });
@@ -154,12 +154,12 @@ async function newapiFetchOnce(base, path, options = {}) {
       timeout,
     );
   } catch (e) {
-    if (e?.name === "AbortError") throw new ApiError("the request was cancelled", { url });
-    // The cause names the fault (ECONNREFUSED, ENOTFOUND, a certificate):
-    // "fetch failed" alone tells a user nothing.
+    if (e?.name === "AbortError") throw new ApiError(t("the request was cancelled"), { url });
+    // cause 里才是真正的故障（ECONNREFUSED、ENOTFOUND、证书），
+    // 光一句 "fetch failed" 对用户毫无信息。
     const cause = e?.cause?.code ?? e?.cause?.errno ?? "";
     const why = cause ? `${e?.message ?? e} (${cause})` : (e?.message ?? String(e));
-    throw new ApiError(`could not reach ${url}: ${why}`, { url });
+    throw new ApiError(t("could not reach {url}: {why}", { url, why }), { url });
   }
 
   const text = await res.text();
@@ -185,13 +185,13 @@ async function newapiFetchOnce(base, path, options = {}) {
     const message = envelopeMessage(payload, text);
     const turnstile = /turnstile/i.test(message) || /captcha/i.test(message);
     if (turnstile) throw new ChallengeError("turnstile", message, { status: res.status, url, body: text.slice(0, 500) });
-    throw new ApiError(message || "New API refused the request", { status: res.status, url, body: text.slice(0, 500) });
+    throw new ApiError(message || t("New API refused the request"), { status: res.status, url, body: text.slice(0, 500) });
   }
 
   return { payload, status: res.status, url, text };
 }
 
-/** GET /api/status — public; quota units, currency display, check-in and Turnstile switches. */
+/** GET /api/status —— 公开；额度单位、货币显示、签到与 Turnstile 开关。 */
 export async function getStatus(base, opts = {}) {
   const { payload } = await newapiFetch(base, "/api/status", { ...opts, timeout: opts.timeout ?? 8000 });
   const data = payload?.data ?? payload ?? {};
@@ -212,7 +212,7 @@ export async function getStatus(base, opts = {}) {
   };
 }
 
-/** GET /api/user/self — id, username, group, quota, used quota, request count. */
+/** GET /api/user/self —— id、用户名、分组、剩余额度、已用额度、请求数。 */
 export async function getUserSelf(base, token, userId, opts = {}) {
   const { payload } = await newapiFetch(base, "/api/user/self", { ...opts, token, userId });
   const data = payload?.data ?? payload ?? {};
@@ -234,7 +234,7 @@ function parseGroupPayload(payload) {
   const out = {};
   if (!data || typeof data !== "object") return out;
   if (Array.isArray(data)) {
-    // Some forks answer a bare list of names.
+    // 有些分支直接返回一串名字。
     for (const item of data) {
       if (typeof item === "string" && item.trim()) out[item.trim()] = { ratio: 0, desc: "" };
       else if (item && typeof item === "object") {
@@ -259,9 +259,9 @@ function parseGroupPayload(payload) {
 }
 
 /**
- * GET /api/user/self/groups, with the older paths as fallbacks:
- * /api/user/groups and /api/user_group_map (forks such as AnyRouter).
- * A 404 or an empty answer moves on to the next path.
+ * GET /api/user/self/groups，老路径作为后备：
+ * /api/user/groups 与 /api/user_group_map（AnyRouter 之类的分支）。
+ * 404 或空答案就换下一个路径。
  */
 export async function getUserGroups(base, token, userId, opts = {}) {
   const paths = ["/api/user/self/groups", "/api/user/groups", "/api/user_group_map"];
@@ -284,10 +284,9 @@ export async function getUserGroups(base, token, userId, opts = {}) {
 }
 
 /**
- * GET /api/pricing — the model square: which groups serve a model and which
- * endpoint types it supports, plus the group ratios. Public on most sites,
- * user-scoped on others, root-only on a few (then this returns empty and
- * the caller falls back to /v1/models and /api/user/models).
+ * GET /api/pricing —— 模型广场：哪些分组提供某个模型、它支持哪些端点类型，
+ * 以及各分组倍率。多数站点公开，有些要登录，少数只对管理员开放
+ * （这时返回空，调用方退回 /v1/models 与 /api/user/models）。
  */
 export async function getPricing(base, token, userId, opts = {}) {
   let payload;
@@ -334,7 +333,7 @@ export async function getPricing(base, token, userId, opts = {}) {
   return { models, groupRatio, usableGroup, autoGroups, pricingVersion: String(payload?.pricing_version ?? "") };
 }
 
-/** One page of GET /api/token/ (the list never includes the full key). */
+/** GET /api/token/ 的一页（列表接口从不返回完整 key）。 */
 function parseTokenPage(payload) {
   const data = payload?.data ?? payload ?? {};
   const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
@@ -343,8 +342,8 @@ function parseTokenPage(payload) {
 }
 
 /**
- * Every token of the account, across pages. `key` is masked by the site;
- * `revealTokens` gets the real value for the ids it is allowed to.
+ * 账号的全部 token，跨页读取。站点返回的 `key` 是掩码；
+ * 完整值要另走 revealTokenKeys，而且只对它允许的 id 有效。
  */
 export async function listTokens(base, token, userId, opts = {}) {
   const pageSize = 100;
@@ -399,20 +398,19 @@ export async function listTokens(base, token, userId, opts = {}) {
   });
 }
 
-/** The token entry is still usable: enabled, not expired, and not used up. */
+/** 这个 token 还能用：未禁用、未过期、没用完。 */
 export function tokenUsable(t, now = Date.now() / 1000) {
   if (!t) return false;
-  if (t.status === 2 || t.status === 3) return false; // disabled / expired
+  if (t.status === 2 || t.status === 3) return false; // 已禁用 / 已过期
   if (t.expiredTime > 0 && t.expiredTime < now) return false;
   if (!t.unlimitedQuota && t.remainQuota <= 0) return false;
   return true;
 }
 
 /**
- * The full keys for token ids, as far as the account may see them.
- * Tries the batch endpoint once, then the per-token one for what is left.
- * Every failure is non-fatal: the caller keeps whatever it got and asks the
- * user for the rest.
+ * 按 id 取 token 的完整 key，能取到多少算多少。
+ * 先试批量接口，剩下的逐个取。任何失败都不致命：
+ * 调用方保留已拿到的，剩下的问用户。
  */
 export async function revealTokenKeys(base, token, userId, ids, opts = {}) {
   const keys = new Map();
@@ -436,7 +434,7 @@ export async function revealTokenKeys(base, token, userId, ids, opts = {}) {
       }
     } catch (e) {
       if (e instanceof ChallengeError || isAuthError(e)) {
-        // No reveal permission at all: no point asking one by one.
+        // 完全没有 reveal 权限：逐个问也没意义。
         return keys;
       }
     }
@@ -456,8 +454,8 @@ export async function revealTokenKeys(base, token, userId, ids, opts = {}) {
 }
 
 /**
- * POST /api/token/ — create a token for a group. New API answers success
- * without an id or a key, so the caller lists tokens again and reveals it.
+ * POST /api/token/ —— 为某个分组建一个 token。New API 只回 success，
+ * 既不给 id 也不给 key，所以调用方要重新列一遍 token 再 reveal。
  */
 export async function createToken(base, token, userId, group, name, opts = {}) {
   await newapiFetch(base, "/api/token/", {
@@ -478,7 +476,7 @@ export async function createToken(base, token, userId, group, name, opts = {}) {
   });
 }
 
-/** GET /v1/models with a group key: the models that key may call. */
+/** 用分组 key 调 GET /v1/models：这个 key 能调哪些模型。 */
 export async function listModelsForKey(base, key, opts = {}) {
   const { payload } = await newapiFetch(base, "/v1/models", {
     ...opts,
@@ -493,7 +491,7 @@ export async function listModelsForKey(base, key, opts = {}) {
       if (id) out.push(id);
     }
   } else if (data && typeof data === "object") {
-    // Gemini-style { models: [ { name: "models/x" } ] }
+    // Gemini 风格：{ models: [ { name: "models/x" } ] }
     for (const item of data.models ?? []) {
       const raw = String(item?.name ?? item?.id ?? "");
       if (raw) out.push(raw.replace(/^models\//, ""));
@@ -502,7 +500,7 @@ export async function listModelsForKey(base, key, opts = {}) {
   return [...new Set(out)];
 }
 
-/** GET /api/user/models?group= — the fallback model list when pricing is closed. */
+/** GET /api/user/models?group= —— 模型广场关闭时的后备模型列表。 */
 export async function listUserModels(base, token, userId, group, opts = {}) {
   const { payload } = await newapiFetch(base, "/api/user/models", {
     ...opts,
@@ -516,10 +514,10 @@ export async function listUserModels(base, token, userId, group, opts = {}) {
   return [];
 }
 
-/** GET /api/user/self/checkin — the switch and today's state. */
+/** GET /api/user/self/checkin —— 签到开关与今天的状态。 */
 export const CHECKIN_PATHS = ["/api/user/self/checkin", "/api/user/checkin"];
 
-/** The paths a site has answered for check-in, so the next call asks the right one first. */
+/** 站点回答过的签到路径，下次先问对的那个。 */
 const checkinPathKnown = new Map();
 
 function parseCheckinStatus(payload, path) {
@@ -539,10 +537,10 @@ function parseCheckinStatus(payload, path) {
 }
 
 /**
- * The site's check-in state. New API has had two layouts: the newer
- * /api/user/self/checkin (under the dashboard's self routes) and the
- * older /api/user/checkin, which some builds — v1.0.0-rc.46 among them —
- * keep alone. Both are tried; the one that answered is remembered.
+ * 站点的签到状态。New API 有过两种布局：较新的
+ * /api/user/self/checkin（在后台的 self 路由下），和较老的
+ * /api/user/checkin——有些版本（v1.0.0-rc.46 就是）只有后者。
+ * 两种都会试，记住能回答的那个。
  */
 export async function getCheckinStatus(base, token, userId, opts = {}) {
   const known = checkinPathKnown.get(base);
@@ -551,8 +549,8 @@ export async function getCheckinStatus(base, token, userId, opts = {}) {
   for (const path of paths) {
     try {
       const { payload } = await newapiFetch(base, path, { ...opts, token, userId, timeout: opts.timeout ?? 8000 });
-      // An answer without the fields is the site's other route (a 200 page or
-      // an empty body), not the check-in state.
+      // 没有这些字段的答案说明命中了站点的别的路由（一个 200 的页面或空正文），
+      // 不是签到状态。
       const state = parseCheckinStatus(payload, path);
       if (payload?.data === undefined && payload?.success === undefined) {
         lastError = lastError ?? new ApiError("the site answered no check-in state", { url: path });
@@ -564,18 +562,17 @@ export async function getCheckinStatus(base, token, userId, opts = {}) {
       if (e instanceof ChallengeError) throw e;
       if (isAuthError(e)) throw e;
       const status = /** @type {ApiError} */ (e)?.status;
-      // 404/405: not this layout. Anything else is the site speaking.
+      // 404/405：不是这种布局。其他状态码就是站点在说话了。
       if (status !== 404 && status !== 405) throw e;
       lastError = e;
     }
   }
-  throw lastError ?? new ApiError("the site has no check-in endpoint", { status: 404 });
+  throw lastError ?? new ApiError(t("the site has no check-in endpoint"), { status: 404 });
 }
 
 /**
- * Press the check-in. `path` is the layout the status read found; without
- * one both are tried, the newer first. A 404/405 on a path is not a
- * refusal: the site has the other layout.
+ * 按下签到。`path` 是读状态时找到的布局；没有就两种都试，新的在前。
+ * 某个路径回 404/405 不算拒绝：站点用的是另一种布局。
  */
 export async function postCheckin(base, token, userId, opts = {}) {
   const known = opts.path ?? checkinPathKnown.get(base);
@@ -585,7 +582,7 @@ export async function postCheckin(base, token, userId, opts = {}) {
     try {
       const { payload } = await newapiFetch(base, path, { ...opts, token, userId, method: "POST" });
       const r = checkinResult(payload);
-      // The older endpoint answers {data:{reward}} or only a message.
+      // 旧接口用 {data:{reward}} 回答，或者只给一句 message。
       if (!r.success && payload?.data?.reward !== undefined) {
         return { success: true, message: r.message, data: { quota_awarded: Number(payload.data.reward) || 0, checkin_date: String(payload.data.checkin_date ?? "") } };
       }
@@ -599,7 +596,7 @@ export async function postCheckin(base, token, userId, opts = {}) {
       lastError = e;
     }
   }
-  throw lastError ?? new ApiError("the site has no check-in endpoint", { status: 404 });
+  throw lastError ?? new ApiError(t("the site has no check-in endpoint"), { status: 404 });
 }
 
 function checkinResult(payload) {

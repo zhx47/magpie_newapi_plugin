@@ -12,12 +12,12 @@ function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "newapi-hooks-"));
 }
 
-/** A group's key in the account. */
+/** 账号里某个分组的 key。 */
 function key(md, group) {
   return md.groups?.[group]?.key;
 }
 
-/** Groups with no key and no failed attempt. */
+/** 没有 key、也没有失败记录的分组。 */
 function pend(md) {
   return Object.entries(md.groups ?? {})
     .filter(([, g]) => !g.key && !g.tried)
@@ -25,7 +25,7 @@ function pend(md) {
     .sort();
 }
 
-/** What Magpie's host.js writes after a sign-in: plugin-auth.json. */
+/** Magpie 的 host.js 在登录之后写的文件：plugin-auth.json。 */
 function saveAuth(directory, signed) {
   const file = path.join(directory, "plugin-auth.json");
   let all = {};
@@ -43,7 +43,7 @@ function saveAuth(directory, signed) {
   return file;
 }
 
-/** Load the plugin as Magpie does, and sign in to the mock. */
+/** 按 Magpie 的方式加载插件，并登录到 mock 站点。 */
 async function setup(options = {}) {
   const site = await startNewAPI(options.site);
   const directory = tmpdir();
@@ -70,7 +70,7 @@ test("the module exports one plugin function, as host.js's servers() reads it", 
   assert.equal(typeof plugin, "object");
   assert.equal(typeof plugin.server, "function");
   assert.equal(plugin.id, "newapi");
-  // No other function export: host.js would call each as a plugin too.
+  // 不导出别的函数：host.js 会把每个导出函数都当插件调用。
   assert.deepEqual(Object.keys(plugin).sort(), ["id", "server"]);
 });
 
@@ -82,15 +82,14 @@ test("auth declares one keyless API method that asks its own questions", async (
     assert.equal(auth.methods.length, 1);
     const m = auth.methods[0];
     assert.equal(m.type, "api");
-    // keyless is what stops Magpie from asking for an "API key" after the
-    // token: the access token was already the token question.
+    // keyless 阻止 Magpie 在令牌之后再问一次「API key」：
+    // 访问令牌本来就是那一问。
     assert.equal(m.keyless, true);
     assert.equal(typeof m.ask, "function");
     assert.equal(typeof m.authorize, "function");
 
-    // The questions, in order, as Magpie walks them. With an account on
-    // disk the first is a picker; here the directory is empty, so the base
-    // URL comes first.
+    // 按 Magpie 的顺序走一遍问题。磁盘上有账号时第一问是选择器；
+    // 这里的目录是空的，所以从站点地址问起。
     const asked = async (inputs) => m.ask(inputs);
     const q1 = await asked({});
     assert.equal(q1.key, "baseURL");
@@ -101,7 +100,7 @@ test("auth declares one keyless API method that asks its own questions", async (
     const q3 = await asked({ baseURL: site.base, accessToken: ACCESS_TOKEN });
     assert.equal(q3.key, "userId");
 
-    // The options are boolean switches with defaults.
+    // 选项是带默认值的布尔开关。
     assert.ok(auth.options.length >= 4);
     for (const o of auth.options) {
       assert.equal(typeof o.default, "boolean");
@@ -113,13 +112,13 @@ test("auth declares one keyless API method that asks its own questions", async (
 });
 
 test("the missing group is asked by name, and a refused key is asked again", async () => {
-  // reveal denied and nothing pasted: the groups the filter names need a key.
+  // reveal 被拒、也没填任何 key：过滤器点名的分组都需要 key。
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const directory = tmpdir();
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    // Creation comes first: say no, then the groups are asked one by one.
+    // 先问创建：答 no 之后才逐个分组问。
     const askNoCreate = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "", groupFilter: "default,vip" };
     const offer = await ask(askNoCreate);
     assert.equal(offer.key, "autoCreate", "the site is offered the chance to create keys first");
@@ -132,18 +131,18 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     assert.match(q1.message, /"default"/);
     assert.equal(q1.type, "password");
 
-    // A key the site refuses is asked again, and the question says why.
+    // 站点拒绝的 key 会再问一次，问题里说明原因。
     const bad = await ask({ ...head, [q1.key]: "sk-not-a-real-key" });
     assert.equal(bad.key, q1.key, "the same group is asked again");
     assert.match(bad.message, /refused/);
 
-    // A working key moves on to the next group, never back to this one.
+    // 可用的 key 会前进到下一个分组，绝不回到这一个。
     const q2 = await ask({ ...head, [q1.key]: DEFAULT_KEY });
     assert.match(q2.key, /^groupkey:/);
     assert.notEqual(q2.key, q1.key);
     assert.match(q2.message, /"vip"/);
 
-    // Both answered: the check-in switch follows, and that is the last.
+    // 两个都答完：接着问签到开关，那是最后一问。
     const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY };
     const q3 = await ask(answered);
     assert.equal(q3.key, "checkin");
@@ -161,7 +160,7 @@ test("provider.models answers per account, with protocols and group namespaces",
     assert.ok(ids.some((id) => id.endsWith("/default/gpt-4o")));
     assert.ok(ids.some((id) => id.endsWith("/vip/gpt-4o")));
     assert.ok(ids.some((id) => id.endsWith("/vip/gpt-5")));
-    // Each entry is an OpenCode Model: `api`, not `provider`.
+    // 每个条目都是 OpenCode Model：用 `api`，不是 `provider`。
     for (const [id, m] of Object.entries(models)) {
       assert.ok(m.api, `${id} has an api`);
       assert.equal(typeof m.api.id, "string");
@@ -198,7 +197,7 @@ test("provider.models honors exposeAllProtocols from the plugin options", async 
   }
 });
 
-/** What the site and the account looked like when a listing came up short. */
+/** 列举结果不对时，站点与账号当时的样子。 */
 export function diagnostics(site, auth, ids) {
   const reqs = site.state.requests.map((r) => `${r.method} ${r.path}${r.search} -> ${r.status ?? ""}`).join(" | ");
   return [
@@ -213,7 +212,7 @@ test("the loader's fetch sends a request with the group's key", async () => {
   const { site, instance, auth } = await setup();
   try {
     const loader = instance.auth.loader(async () => auth);
-    // The placeholder is not the account's token.
+    // 占位符不是账号的令牌。
     assert.equal(loader.apiKey, "magpie-newapi");
     const res = await loader.fetch(`${site.base}/v1/chat/completions`, {
       method: "POST",
@@ -224,7 +223,7 @@ test("the loader's fetch sends a request with the group's key", async () => {
     assert.equal(seen.seen.group, "vip");
     assert.equal(seen.seen.model, "gpt-4o");
     assert.equal(seen.seen.auth, VIP_KEY);
-    // A group with no key at all says how to fix it.
+    // 完全没有 key 的分组会提示怎么修。
     const missing = await loader.fetch(`${site.base}/v1/chat/completions`, {
       method: "POST",
       body: JSON.stringify({ model: JSON.stringify(["svip", "gpt-5"]) }),
@@ -246,7 +245,7 @@ test("usage answers a wallet window and the site's plan", async () => {
     const balance = usage.windows.find((w) => w.name === "Balance");
     assert.equal(balance.balance, 10);
     assert.equal(balance.display, "$10.00 left");
-    // The card never carries a key.
+    // 卡片里从不带 key。
     assert.ok(!JSON.stringify(usage).includes(VIP_KEY));
   } finally {
     await site.close();
@@ -303,9 +302,8 @@ test("a Cloudflare check-in marks the account so the next day is one request che
     const before = site.state.requests.length;
     const again = await instance.auth.checkin(async () => saved[0]);
     assert.equal(again.outcome, "captcha");
-    // The check-in is not pressed again. The group sync still reads the
-    // account's groups (a GET), which is what keeps a new group from going
-    // unnoticed in an account signed in weeks ago.
+    // 不会再去按签到。分组同步仍会读账号的分组（GET），
+    // 正是它让几周前登录的账号也能发现新分组。
     const pressed = site.state.requests.slice(before).filter((r) => r.method === "POST" && r.path.includes("checkin"));
     assert.deepEqual(pressed, [], "no check-in POST once the block is known");
   } finally {
@@ -320,8 +318,8 @@ test("a Turnstile site is reported as a captcha without being pressed or marked"
     const result = await instance.auth.checkin(async () => auth);
     assert.equal(result.outcome, "captcha");
     assert.match(result.message, /captcha/i);
-    // Nothing was pressed, and the site setting is not remembered as a block:
-    // the site can turn Turnstile off and the next day's read sees it.
+    // 什么都没按，站点设置也没被记成封锁：站点可能关掉 Turnstile，
+    // 第二天读一次就知道了。
     const after = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length;
     assert.equal(after, before);
     assert.equal(saved.length, 0);
@@ -342,9 +340,9 @@ test("the config hook leaves the user's provider settings alone", async () => {
 });
 
 test("the method is keyless so Magpie does not ask for the token twice", async () => {
-  // Magpie shows its own "API key" box after an api method's questions
-  // unless the method is keyless (gui: ms[method].keyless). Without it the
-  // access token was typed, then asked again under the method's label.
+  // Magpie 会在 api 方式问完之后弹自己的「API key」框，
+  // 除非方式声明 keyless（gui: ms[method].keyless）。没有它，
+  // 访问令牌输一遍之后还会以方式标签为题再问一遍。
   const { site, instance } = await setup();
   try {
     const m = instance.auth.methods[0];
@@ -362,7 +360,7 @@ test("a model's id is the site, the group and the model", async () => {
     const models = await instance.provider.models({ models: {} }, { auth });
     const id = Object.keys(models).find((k) => k.endsWith("/vip/gpt-5"));
     assert.ok(id, "the model is listed");
-    // `<siteLabel>/<group>/<model>`; Magpie shows it as newapi/<id>
+    // `<siteLabel>/<group>/<model>`；Magpie 显示成 newapi/<id>
     const [label, group, model] = id.split("/");
     assert.equal(label, auth.metadata.siteLabel, "the site label");
     assert.equal(group, "vip");
@@ -377,7 +375,7 @@ test("model names read model · site · group · ratio · protocol", async () =>
   try {
     const models = await instance.provider.models({ models: {} }, { auth });
     const siteLabel = auth.metadata.siteLabel;
-    // A Responses model names its protocol; a chat model leaves it out.
+    // Responses 模型会写协议名；chat 模型不写。
     const responses = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-5"));
     assert.equal(responses.name, `gpt-5 · ${siteLabel} · vip · ×0.8 · Responses`);
     const chat = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-4o"));
@@ -403,8 +401,7 @@ test("two accounts of one site share a model id on purpose", async () => {
     const bId = Object.keys(modelsB).find((k) => k.endsWith("/default/gpt-4o"));
     assert.equal(aId, bId, "one row for one site's model, whichever account lists it");
 
-    // A different site label is a different id, so the same model name from
-    // two sites stays two rows.
+    // 不同的站点标识就是不同的 ID，所以两个站点的同名模型保持两行。
     const c = await startNewAPI();
     try {
       const signedC = await signIn({ baseURL: c.base, accessToken: ACCESS_TOKEN, siteLabel: "other-site" }, { directory: tmpdir() });
@@ -431,7 +428,7 @@ test("the usage rows that are text carry no share", async () => {
       assert.equal(w.used, undefined, `${name} must not claim a 0% share`);
       assert.ok(w.display, `${name} says its text`);
     }
-    // The wallet is a reading, not a share: balance with no used.
+    // 钱包是读数不是比例：只有 balance，没有 used。
     const balance = usage.windows.find((x) => x.name === "Balance");
     assert.equal(balance.used, undefined);
     assert.equal(typeof balance.balance, "number");
@@ -440,11 +437,11 @@ test("the usage rows that are text carry no share", async () => {
   }
 });
 
-// ---- following a site whose groups change ---------------------------------
+// ---- 跟进分组会变的站点 ----------------------------------------------
 
 test("a new group at the site reaches an account signed in before it", async () => {
-  // Sign in, then add a group at the site with a key of its own, as an
-  // operator would. Nothing is typed in Magpie after the sign-in.
+  // 先登录，然后像管理员那样在站点上加一个带 key 的分组。
+  // 登录之后在 Magpie 里什么都不用填。
   const { site, instance, auth, saved } = await setup({ site: { reveal: "allow" } });
   try {
     assert.equal(auth.metadata.groups.later, undefined, "the group did not exist at sign-in");
@@ -458,10 +455,9 @@ test("a new group at the site reaches an account signed in before it", async () 
       ],
     });
 
-    // A usage read picks it up: the sync reads the site's groups and the
-    // token list, then writes the account back. The listing is left out of
-    // this on purpose — Magpie gives a provider's models hook 20s in all,
-    // shared with every other provider.
+    // 一次用量读取就会带出来：同步读站点的分组和 token 列表，
+    // 再把账号写回。这里故意不走列举——Magpie 给一个供应商的模型钩子
+    // 一共 20 秒，还和其他供应商共用。
     await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: { ...auth.metadata, groupFilter: "" } }));
 
     const after = saved.at(-1);
@@ -477,7 +473,7 @@ test("a new group at the site reaches an account signed in before it", async () 
 test("a key the site refuses is reported as refused, not as working", async () => {
   const { site, instance, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupKeys: "default=sk-revoked-key" } });
   try {
-    // A listing checks each key with /v1/models; this one is refused.
+    // 列举会用 /v1/models 校验每个 key；这一个被拒了。
     await instance.provider.models({ models: {} }, { auth }).catch(() => {});
     const usage = await instance.auth.usage(async () => auth);
     const row = usage.windows.find((w) => /keys/i.test(w.name));
@@ -504,7 +500,7 @@ test("the check-in reads the groups before it presses, once a day", async () => 
 test("autoCreate fills a group that appeared after sign-in", async () => {
   const { site, auth, saved } = await setup({ site: { reveal: "allow" }, inputs: { groupFilter: "default" } });
   try {
-    // A group the operator added, with no token of its own.
+    // 管理员新加的分组，本身没有 token。
     site.set({
       groups: { ...site.state.groups, newish: { ratio: 0.9, desc: "new" } },
       models: { ...site.state.models, newish: ["gpt-4o"] },
@@ -523,7 +519,7 @@ test("autoCreate fills a group that appeared after sign-in", async () => {
   }
 });
 
-// ---- a listing must stay inside Magpie's 20s deadline ----------------------
+// ---- 列举必须待在 Magpie 的 20 秒期限内 -------------------------------
 
 test("the sync is throttled: a second usage read does not read the site again", async () => {
   const { site, instance, getAuth } = await setup();
@@ -534,7 +530,7 @@ test("the sync is throttled: a second usage read does not read the site again", 
     const added = site.state.requests
       .slice(afterFirst)
       .filter((r) => r.path.includes("/groups") || r.path.startsWith("/api/token"));
-    // Nothing: the groups and the key verdicts were read a moment ago.
+    // 什么都没有：分组和 key 判定刚刚才读过。
     assert.deepEqual(added.map((r) => r.path), [], "the second usage read synced again");
   } finally {
     await site.close();
@@ -546,7 +542,7 @@ test("a key is checked once, not again for each listing", async () => {
   try {
     await instance.provider.models({ models: {} }, { auth });
     const listCalls = site.state.requests.filter((r) => r.path === "/v1/models");
-    // One request per group with a key (default and vip), not two each.
+    // 每个有 key 的分组一次请求（default 和 vip），不是各两次。
     const keyed = Object.values(auth.metadata.groups ?? {}).filter((g) => g.key).length;
     assert.ok(listCalls.length <= keyed, `${listCalls.length} /v1/models calls for ${keyed} keys`);
   } finally {
@@ -558,8 +554,8 @@ test("a slow site does not push a listing past its budget", async () => {
   const { instance, auth } = { instance: null, auth: null };
   void instance;
   void auth;
-  // The budget is enforced with a race; its unit is exercised directly so a
-  // slow network is simulated without waiting 20 real seconds.
+  // 预算靠竞速实现；这里直接验证它的单位，
+  // 不用真等 20 秒来模拟慢网络。
   const { syncAccount } = await import("../src/sync.mjs");
   const started = Date.now();
   const result = await syncAccount(
@@ -574,12 +570,12 @@ test("a slow site does not push a listing past its budget", async () => {
 test("the models hook reads no groups and presses nothing", async () => {
   const { site, instance, auth } = await setup();
   try {
-    // Only what the listing itself asks: the sign-in above made its own calls.
+    // 只看列举自己发的请求：上面的登录有它自己的调用。
     const mark = site.state.requests.length;
     await instance.provider.models({ models: {} }, { auth });
     const paths = site.state.requests.slice(mark).map((r) => r.path);
-    // Its own listing and the pricing square, nothing else: Magpie gives a
-    // provider's models hook 20s in all, shared with every other provider.
+    // 只有它自己的列举和模型广场，没有别的：Magpie 给一个供应商的模型钩子
+    // 一共 20 秒，还和其他供应商共用。
     assert.ok(!paths.some((p) => p.includes("/groups")), `groups read: ${paths.join(", ")}`);
     assert.ok(!paths.some((p) => p.includes("checkin")), "check-in pressed");
     assert.ok(!paths.some((p) => p.startsWith("/api/token")), `tokens read: ${paths.join(", ")}`);
@@ -592,7 +588,7 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
   const site = await startNewAPI({ reveal: "deny" });
   try {
     const directory = tmpdir();
-    // First sign-in: default and vip get pasted, svip is skipped.
+    // 第一次登录：default 和 vip 手填，svip 跳过。
     const first = await signIn(
       { baseURL: site.base, accessToken: ACCESS_TOKEN, siteLabel: "one-site", groupKeys: "default=sk-first-default;vip=sk-first-vip" },
       { directory },
@@ -601,8 +597,8 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     assert.deepEqual(pend(first.metadata), ["svip"]);
     saveAuth(directory, first);
 
-    // Second sign-in, nothing typed: picking the saved account supplies the
-    // token and the keys it already has, so only svip is asked.
+    // 第二次登录，什么都不填：选中已保存的账号就带来令牌和它已有的 key，
+    // 所以只问 svip。
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
     const account = instance.auth.methods[0];
@@ -610,7 +606,7 @@ test("re-signing in asks only for the groups still missing, and keeps the accoun
     assert.equal(pick.key, "pick");
     const saved = pick.options.find((o) => o.value !== "__new__");
     const head = { pick: saved.value };
-    // One group is missing, so the site is offered the chance to make its key.
+    // 缺一个分组，所以先问站点要不要建它的 key。
     const offer = await ask(head);
     assert.equal(offer.key, "autoCreate");
     assert.match(offer.message, /svip/);
@@ -636,7 +632,7 @@ test("letting the site create keys asks nothing by hand", async () => {
     const directory = tmpdir();
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
-    // No token for svip: sign in, then say yes to creation.
+    // svip 没有 token：登录，然后对创建答 yes。
     const head = {
       baseURL: site.base,
       accessToken: ACCESS_TOKEN,
@@ -650,8 +646,7 @@ test("letting the site create keys asks nothing by hand", async () => {
     const created = JSON.parse(made.options[0].value);
     assert.match(created.svip, /^sk-created-/, `svip was created: ${JSON.stringify(created)}`);
 
-    // With that answer in hand nothing is asked again, and the account is
-    // signed in with the created key.
+    // 拿着这个答案就不再问任何问题，账号用建出来的 key 登录。
     const next = await ask({ ...head, [made.key]: made.options[0].value });
     assert.equal(next.key, "checkin");
 
@@ -667,7 +662,7 @@ test("letting the site create keys asks nothing by hand", async () => {
   }
 });
 
-// ---- re-signing in without retyping the token ------------------------------
+// ---- 重新登录时不用重敲令牌 --------------------------------------------
 
 test("an account already on disk is offered first, and its token reused", async () => {
   const site = await startNewAPI({ reveal: "deny" });
@@ -680,8 +675,8 @@ test("an account already on disk is offered first, and its token reused", async 
     assert.equal(first.type, "success");
     saveAuth(directory, first);
 
-    // A brand-new sign-in in the same Magpie: the first question is the
-    // picker, not a base URL and a token to remember.
+    // 在同一个 Magpie 里重新登录：第一问是账号选择器，
+    // 而不是让人回忆站点地址和令牌。
     const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
     const ask = (inputs) => instance.auth.methods[0].ask(inputs);
     const pick = await ask({});
@@ -690,14 +685,14 @@ test("an account already on disk is offered first, and its token reused", async 
     const offered = pick.options.find((o) => o.value !== "__new__");
     assert.ok(offered, "the saved account is offered");
     assert.match(offered.label, /one-site/);
-    // The site lists three groups; two of them have a pasted key.
-    assert.match(offered.hint, /3 groups/);
+    // 站点有三个分组；提示里写了数量和签到是否开启。
+    assert.match(offered.hint, /^3 · /);
 
-    // Picking it answers the token and the label with nothing typed.
+    // 选中它，令牌和标识都不用输入就填好了。
     const picked = await ask({ pick: offered.value });
     assert.equal(picked.key, "autoCreate", "it goes straight to the missing group");
 
-    // The sign-in itself needs no token from the caller either.
+    // 登录本身也不需要调用方提供令牌。
     const second = await signIn({ pick: offered.value, autoCreate: "no" }, { directory });
     assert.equal(second.type, "success");
     assert.equal(second.metadata.accountId, first.metadata.accountId);
@@ -718,7 +713,7 @@ test("a new site is still one of the choices", async () => {
     const pick = await ask({});
     const fresh = pick.options.find((o) => o.value === "__new__");
     assert.ok(fresh, "the way to another site is offered");
-    // Picking it asks for the base URL, as a first sign-in does.
+    // 选中它就会问站点地址，和第一次登录一样。
     const q = await ask({ pick: "__new__" });
     assert.equal(q.key, "baseURL");
   } finally {
@@ -726,11 +721,11 @@ test("a new site is still one of the choices", async () => {
   }
 });
 
-// ---- creation must never repeat ------------------------------------------
+// ---- 创建绝不能重复 ----------------------------------------------------
 
 test("a group whose token cannot be revealed gets no second token", async () => {
-  // The site creates tokens but will not hand their keys over. Before the
-  // fix every sync made another one: a hundred tokens for one group.
+  // 站点会建 token，但不会交出它的 key。修好之前每次同步都会再建一个：
+  // 一个分组堆出一百多个 token。
   const { site, auth } = await setup({ site: { reveal: "deny" }, inputs: { groupFilter: "default" } });
   try {
     site.set({
@@ -746,11 +741,10 @@ test("a group whose token cannot be revealed gets no second token", async () => 
     });
     const mdBase = { ...auth.metadata, groupFilter: "" };
 
-    // Three runs, as days would be; each forces the sync.
+    // 跑三轮，相当于三天；每轮都强制同步。
     for (let day = 0; day < 3; day++) {
       await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: mdBase }));
-      // The sync's own throttle is per account and ten minutes; a new
-      // account id per run stands in for the next day.
+      // 同步的节流是按账号十分钟；每轮换一个账号 id 来代表下一天。
       mdBase.baseURL = site.base;
       const made = site.state.created.filter((t) => t.group === "stuck");
       assert.ok(made.length <= 1, `day ${day}: ${made.length} tokens made for one group`);
@@ -769,7 +763,7 @@ test("a group that already has a token is reused, not duplicated", async () => {
     const dir = tmpdir();
     const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, groupFilter: "default" }, { directory: dir });
     const auth = { type: "api", key: signed.key, metadata: signed.metadata };
-    // The operator adds a group and makes a token for it themselves.
+    // 管理员自己加了个分组，也自己给它建了 token。
     site.set({
       groups: { ...site.state.groups, added: { ratio: 1, desc: "" } },
       models: { ...site.state.models, added: ["gpt-4o"] },
@@ -785,8 +779,8 @@ test("a group that already has a token is reused, not duplicated", async () => {
     const md = { ...auth.metadata, groupFilter: "" };
     await instance.auth.usage(async () => ({ type: "api", key: auth.key, metadata: md }));
 
-    // svip has no token at all, so one is made for it; `added` has one, and
-    // must not get a second.
+    // svip 完全没有 token，所以给它建一个；`added` 已经有了，
+    // 不能再建第二个。
     const added = site.state.created.filter((t) => t.group === "added");
     assert.equal(added.length, 0, `a token was made for a group that had one: ${JSON.stringify(added)}`);
   } finally {

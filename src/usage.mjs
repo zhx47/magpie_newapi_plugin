@@ -1,24 +1,24 @@
-// What an account has used and holds, as Magpie's usage card shows it:
-// the wallet's balance, the spend and request count, the groups Magpie
-// knows, and whether check-in is off or blocked.
+// 一个账号用了多少、还剩多少，也就是 Magpie 用量卡片显示的内容：
+// 钱包余额、已用额度与请求数、Magpie 知道的分组，以及签到是否关闭或被拦。
 //
-// A wallet window (`balance`, no `used`) makes Magpie treat the account as
-// prepaid and route by what is left. Text windows (`used: 0` with
-// `display`) are read, never counted, so they cannot skew routing.
+// 钱包窗口（有 `balance`、没有 `used`）让 Magpie 把账号当成预付的，
+// 按剩余多少排序。纯文本窗口（只有 `display`、**不带** `used`）只读不计数，
+// 所以不会影响路由。
 
 import { getStatus, getUserSelf } from "./api.mjs";
 import { caches, cacheKey, groupsMissing, groupsNeedingAttention, groupsOf, sortGroups } from "./state.mjs";
 
 import { formatQuota, quotaAsNumber, quotaInfo, quotaUnit } from "./util.mjs";
+import { t } from "./i18n.mjs";
 
-/** The account's own numbers, cached briefly: balances move slowly. */
+/** 账号自己的数字，短暂缓存：余额变化很慢。 */
 export async function readAccount(md, opts = {}) {
   const base = md.baseURL;
   const key = cacheKey(base, "self", md.accessToken);
   return caches.usage.getOr(key, 30_000, () => retried(() => getUserSelf(base, md.accessToken, md.userId, { ...opts, timeout: 10_000 })));
 }
 
-/** A read retried once when the connection itself failed (status 0). */
+/** 连接本身失败（status 0）时重读一次。 */
 async function retried(fn) {
   try {
     return await fn();
@@ -28,14 +28,14 @@ async function retried(fn) {
   }
 }
 
-/** The site's display settings, cached for a while. */
+/** 站点的显示设置，缓存一段时间。 */
 export async function readStatus(md, opts = {}) {
   return caches.status.getOr(cacheKey(md.baseURL, "status"), 10 * 60_000, () => getStatus(md.baseURL, { ...opts, timeout: 8000 }));
 }
 
 /**
- * Build the usage answer. Throws when the access token is refused, so the
- * caller can decide between `signIn: "kept"` and letting the account lapse.
+ * 组装用量回答。访问令牌被拒时抛错，让调用方决定是用
+ * `signIn: "kept"` 保住账号，还是让它标记为失效。
  */
 export async function buildUsage(md, opts = {}) {
   const self = await readAccount(md, opts);
@@ -52,65 +52,70 @@ export async function buildUsage(md, opts = {}) {
     quota_display_type: status?.quotaDisplayType ?? md.status?.quotaDisplayType,
     custom_currency_symbol: status?.customCurrencySymbol ?? md.status?.currencySymbol,
     custom_currency_exchange_rate: status?.customCurrencyExchangeRate ?? md.status?.currencyRate,
-    // CNY divides by this; without it a CNY balance reads low by the rate.
+    // 人民币要除这个汇率；不乘它，人民币余额会少算一个汇率倍数。
     usd_exchange_rate: status?.usdExchangeRate ?? md.status?.usdExchangeRate,
   });
 
   const groupsMap = groupsOf(md);
   const groupNames = sortGroups(Object.keys(groupsMap));
-  const groupList = groupNames.length ? groupNames.join(", ") : "—";
+  const groupList = groupNames.length ? groupNames.join(", ") : t("No groups yet · check in or open Usage to read them");
   const ratio = groupNames
     .filter((name) => Number(groupsMap[name].ratio) > 0)
     .map((name) => `${name} ×${groupsMap[name].ratio}`)
     .join(", ");
 
-  // `used` is left off every row but the wallet. Magpie reads a window with
-  // a `used` as a share of an allowance: 0 becomes a 0% meter, a trend line
-  // and "not enough data" under it (#2045's HoldsLow), which these rows are
-  // not. Without it the window is text alone, counted by nothing.
+  // 除了钱包，每一行都不带 `used`。Magpie 把带 `used` 的窗口当成额度的比例：
+  // 0 会画成 0% 进度条、一条趋势线，还有下面的「数据不足」
+  // （#2045 的 HoldsLow），而这些行并不是那个意思。
+  // 不带 `used` 时窗口就是纯文本，不参与任何计数。
   const windows = [
     {
-      // A wallet reading, the shape Magpie's #3950 asks for: the figure and
-      // its unit, no `used`. Not `aside`: an aside window is skipped when
-      // the account's allowance is built, and this balance is what routing
-      // weighs a prepaid account by.
-      name: "Balance",
+      // 钱包读数，也就是 Magpie #3950 要的形状：只有数字和单位，没有 `used`。
+      // 不加 `aside`：aside 窗口在组装账号额度时会被跳过，
+      // 而路由正是按这个余额来比较预付账号的。
+      name: t("Balance"),
       balance: quotaAsNumber(self.quota, info),
       unit: quotaUnit(info),
-      display: `${formatQuota(self.quota, info)} left`,
+      display: t("{left} left", { left: formatQuota(self.quota, info) }),
     },
     {
-      name: "Used",
-      display: `${formatQuota(self.usedQuota, info)} used · ${Number(self.requestCount || 0).toLocaleString("en-US")} requests`,
+      name: t("Used"),
+      display: t("{used} used · {n} requests", {
+        used: formatQuota(self.usedQuota, info),
+        n: Number(self.requestCount || 0).toLocaleString("en-US"),
+      }),
     },
     {
-      name: "Groups",
+      name: t("Groups"),
       display: ratio ? `${groupList} (${ratio})` : groupList,
     },
   ];
 
-  // Reckoned from the one groups map: what has no key, and what the site
-  // turned away. One row, since both mean "sign in again and fix this".
+  // 从那一张分组表算出来：哪些没有 key，哪些被站点拒绝。
+  // 合成一行，因为两者都表示「重新登录来修」。
   const missing = groupsMissing(md);
   const problems = groupsNeedingAttention(md).filter((g) => !missing.includes(g));
   if (missing.length || problems.length) {
     const bits = [];
-    if (missing.length) bits.push(`no key: ${missing.join(", ")}`);
+    if (missing.length) bits.push(t("no key: {groups}", { groups: missing.join(", ") }));
     if (problems.length) {
-      bits.push(problems.map((g) => `${g} (${groupsMap[g]?.problem ?? "refused"})`).join(", "));
+      const refused = problems.filter((g) => groupsMap[g]?.problem !== "gone");
+      const gone = problems.filter((g) => groupsMap[g]?.problem === "gone");
+      if (refused.length) bits.push(t("refused: {groups}", { groups: refused.join(", ") }));
+      if (gone.length) bits.push(t("gone: {groups}", { groups: gone.join(", ") }));
     }
     windows.push({
-      name: "Group keys",
-      display: `${bits.join(" · ")} — sign in again to fix`,
+      name: t("Group keys"),
+      display: `${bits.join(" · ")}${t("— sign in again to fix")}`,
     });
   }
 
   if (md.checkin === "off") {
-    windows.push({ name: "Check-in", display: "Auto check-in off · check in on the site" });
+    windows.push({ name: t("Daily check-in"), display: t("Auto check-in off · check in on the site") });
   }
 
-  // No signIn: a clean read clears a lapse mark, which is what a working
-  // token should do. The hook adds "kept" only when the token was refused.
+  // 不带 signIn：一次干净读取会清掉失效标记，正常工作的令牌本该如此。
+  // 只有令牌被拒时，钩子才补上 "kept"。
   return {
     plan: self.group || "",
     user: self.username || "",

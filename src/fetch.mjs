@@ -1,27 +1,26 @@
-// The plugin's fetch: one request from Magpie's gateway to a New API site.
+// 插件的 fetch：把 Magpie 网关的一个请求发到 New API 站点。
 //
-// Magpie already translated the request into the model's protocol. What is
-// left is New API's own shape:
-//   - which group's key signs it (the group is in `api.id`, put there by
-//     models.mjs, and shows up as the body's model or the Gemini path);
-//   - the bare model name the site expects;
-//   - the auth header that endpoint reads.
+// Magpie 已经把请求翻译成模型该用的协议了，剩下的是 New API 自己的规矩：
+//   - 用哪个分组的 key 签名（分组在 `api.id` 里，由 models.mjs 写进去，
+//     表现为请求体里的 model，或 Gemini 的路径段）；
+//   - 站点期望的裸模型名；
+//   - 那个端点读哪个认证头。
 //
-// Access tokens are for the management API and must never reach a relay
-// endpoint, so every header Magpie may have set from the account key is
-// removed first.
+// 访问令牌是给管理接口用的，绝不能出现在推理请求上，
+// 所以先删掉 Magpie 用账号 key 设过的每一个头。
 
 import { ChallengeError, isAuthError } from "./api.mjs";
 import { authStyleOf, geminiModelSegment, parseWireId } from "./protocols.mjs";
 import { groupsOf, keysToTry } from "./state.mjs";
+import { t } from "./i18n.mjs";
 
-/** Read the group and model a request is for. Null when it names neither. */
+/** 读出请求指向的分组与模型；两者都没有时返回 null。 */
 export function readTarget(pathname, bodyText) {
   const segment = geminiModelSegment(pathname);
   if (segment) {
     const parsed = parseWireId(segment);
     if (parsed) return parsed;
-    // A model id that isn't ours: the bare model is what the segment says.
+    // 不是我们的模型 ID：这个路径段本身就是裸模型名。
     try {
       return { group: "", model: decodeURIComponent(segment) };
     } catch {
@@ -37,27 +36,26 @@ export function readTarget(pathname, bodyText) {
         return parsed ?? { group: "", model };
       }
     } catch {
-      // not JSON: nothing to read
+      // 不是 JSON：没有可读的
     }
   }
   return null;
 }
 
 /**
- * The request's path under the account's own site.
+ * 把请求路径固定到**当前账号自己的站点**上。
  *
- * Magpie builds the URL from the model list, and that list is merged across
- * accounts by model id (`host.js`: `models[k] ??= m`). Two accounts of one
- * site with the same label produce one entry, whose `api.url` and `api.id`
- * come from whichever account listed it first. Signing the request with the
- * second account's key while sending it to the first's address would spend
- * the wrong account at the wrong host, so the account's own base and its own
- * default group win here.
+ * Magpie 用模型列表拼 URL，而那张列表是按模型 ID 跨账号合并的
+ * （`host.js`：`models[k] ??= m`）。同一站点、同名的两个账号合并成一条，
+ * 它的 `api.url` 和 `api.id` 来自先列出它的那个账号。
+ * 如果拿第二个账号的 key 签名、却发到第一个账号的地址上，
+ * 就是把错误的账号花在错误的主机上。所以这里让账号自己的 base
+ * 和自己的默认分组说了算。
  *
- * A URL already at this account's site keeps the path Magpie made (its
- * `/v1/chat/completions`, its `/v1beta/models/<id>:streamGenerateContent`);
- * one at another site is rebuilt from this account's base and the protocol
- * the path names.
+ * 已经在本账号站点上的 URL 原样保留 Magpie 拼出的路径
+ * （它的 `/v1/chat/completions`、它的
+ * `/v1beta/models/<id>:streamGenerateContent`）；
+ * 指向别的站点的，用本账号的 base 加上路径里的协议部分重建。
  */
 export function ownURL(href, md) {
   const base = String(md?.baseURL ?? "").replace(/\/+$/, "");
@@ -71,15 +69,15 @@ export function ownURL(href, md) {
   const sameSite = !!mine && url.origin === mine.origin && url.pathname.startsWith(`${mine.pathname.replace(/\/+$/, "")}/`);
   if (sameSite || !base) return { href, sameSite: true };
 
-  // The part of the path that is New API's API, not a prefix the other
-  // site's proxy happens to have: everything from `/v1beta/` or `/v1/` on.
+  // 路径里属于 New API 接口的那一段，而不是对方站点代理碰巧带的前缀：
+  // 从 `/v1beta/` 或 `/v1/` 开始往后。
   const at = url.pathname.search(/\/(v1beta|v1)\//);
   const path = at >= 0 ? url.pathname.slice(at) : url.pathname;
   const qs = url.search || "";
   return { href: `${base}${path}${qs}`, sameSite: false };
 }
 
-/** Replace the body's model with the bare one, keeping everything else. */
+/** 把请求体里的 model 换成裸模型名，其他字段原样保留。 */
 export function rewriteBodyModel(bodyText, model) {
   if (!model || typeof bodyText !== "string") return bodyText;
   let json;
@@ -94,7 +92,7 @@ export function rewriteBodyModel(bodyText, model) {
   return JSON.stringify(json);
 }
 
-/** Replace the model segment of a Gemini path with the bare model. */
+/** 把 Gemini 路径里的模型段换成裸模型名。 */
 export function rewriteGeminiPath(href, model) {
   if (!model) return href;
   const segment = geminiModelSegment(new URL(href).pathname);
@@ -103,9 +101,8 @@ export function rewriteGeminiPath(href, model) {
 }
 
 /**
- * The fetch a plugin's loader gives Magpie. `getAuth` reads the account's
- * current sign-in, so a key the user pasted after signing in is used
- * without a restart.
+ * 插件的 loader 交给 Magpie 的 fetch。`getAuth` 读账号当前的登录信息，
+ * 所以用户登录之后才贴上的 key 不需要重启就会生效。
  */
 export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
   return async function newapiFetch(input, init = {}) {
@@ -118,34 +115,29 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
     try {
       url = new URL(href);
     } catch {
-      return jsonError(400, "New API: the request URL is not valid");
+      return jsonError(400, t("New API: the request URL is not valid"));
     }
 
     const bodyText = typeof init.body === "string" ? init.body : init.body ? String(init.body) : "";
     const target = readTarget(url.pathname, bodyText);
 
-    // The model list Magpie built this URL from is merged across accounts by
-    // model ID, so its `api.url` and the group in `api.id` may be another
-    // account's. Send to this account's own site, and sign for a group this
-    // account actually has.
+    // Magpie 拼这个 URL 用的模型列表是按模型 ID 跨账号合并的，
+    // 所以其中的 `api.url` 和 `api.id` 里的分组可能来自另一个账号。
+    // 发到本账号自己的站点，并且只用本账号真的持有的分组签名。
     const own = ownURL(href, md);
     const ownPath = new URL(own.href).pathname;
     const fallbackGroup = defaultGroup(md, groups);
     const named = target?.group ?? "";
-    // A group this account knows but has no key for is the user's to fix:
-    // answering it with another group's key would spend the wrong group.
-    // A group it has never seen came from another account's model, so the
-    // account's own default group is what that request means here.
+    // 本账号认识、但没有 key 的分组，要等用户补：拿别的分组的 key 去应答，
+    // 花的就是错的分组。本账号从没见过的分组，是别的账号的模型带来的，
+    // 那个请求在这里的意思就是本账号的默认分组。
     const known = Object.prototype.hasOwnProperty.call(md.groups ?? {}, named);
     const group = !named || groups[named]?.key ? named || fallbackGroup : known ? named : fallbackGroup;
     const model = target?.model ?? "";
 
     const keys = keysToTry(groups, group);
     if (!keys.length) {
-      return jsonError(
-        503,
-        `New API: no usable key for group "${group}". Sign in again to add or replace it.`,
-      );
+      return jsonError(503, t("New API: no usable key for group \"{group}\". Sign in again to add or replace it.", { group }));
     }
 
     const style = authStyleOf(ownPath);
@@ -154,8 +146,8 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
 
     for (const key of keys) {
       const headers = new Headers(init.headers ?? {});
-      // Magpie set these from the account's key (an access token) or its
-      // placeholder: none belongs on a relay request.
+      // Magpie 用账号的 key（访问令牌）或占位符设过这些头，
+      // 它们都不该出现在推理请求上。
       headers.delete("authorization");
       headers.delete("x-api-key");
       headers.delete("x-goog-api-key");
@@ -182,8 +174,8 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
       }
 
       if (res.status === 401 || res.status === 403) {
-        // A group key refused is not the account's access token refused:
-        // try the group's next key, and tell Magpie to keep the account.
+        // 分组 key 被拒不等于账号的访问令牌被拒：先试这一组的另一条 key，
+        // 并告诉 Magpie 保住这个账号。
         lastResponse = await keepBody(res);
         continue;
       }
@@ -195,16 +187,15 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
     }
 
     if (lastResponse) {
-      // A refusal from every key must not mark the site's account lapsed:
-      // the access token may still be fine.
+      // 所有 key 都被拒也不能把站点账号标成失效：访问令牌可能还是好的。
       if (lastResponse.status === 401 || lastResponse.status === 403) return kept(lastResponse);
       return lastResponse;
     }
-    return jsonError(502, `New API: ${lastError?.message ?? "the request failed"}`);
+    return jsonError(502, `New API: ${lastError?.message ?? t("New API: the request failed").replace(/^New API: /, "")}`);
   };
 }
 
-/** The group a request without one belongs to: the site's default, else the first keyed group. */
+/** 没指明分组的请求归哪个分组：站点默认分组，否则第一个有 key 的分组。 */
 export function defaultGroup(md, groups = groupsOf(md)) {
   const names = Object.keys(groups).filter((g) => groups[g]?.key && !groups[g]?.problem);
   const wanted = String(md?.defaultGroup ?? "").trim();
@@ -218,7 +209,7 @@ async function keepBody(res) {
     const copy = res.clone();
     await copy.arrayBuffer();
   } catch {
-    // nothing to drain
+    // 没有要排空的内容
   }
   return res;
 }

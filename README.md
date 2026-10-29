@@ -181,6 +181,14 @@ newapi/<siteLabel>/<group>/<model>
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。
 
+## 语言
+
+界面文案跟随 Magpie 的语言设置（Settings → 语言：English / 简体中文 / 繁体中文 / 日本语 / Deutsch）。
+
+插件的提问、用量卡片、错误消息都从 `src/i18n.mjs` 取，那里有全部 5 种语言的翻译。语言从 Magpie 配置目录的 `settings.json` 里的 `lang` 字段读；`system`（跟随系统）或无法识别的语言退回英文，和 Magpie 窗口的处理一致。
+
+代码注释一律中文。
+
 ## 开发
 
 ```sh

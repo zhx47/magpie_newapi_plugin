@@ -1,14 +1,14 @@
-// A New API site in a box, for tests: the endpoints this plugin uses,
-// with the envelopes New API really sends (HTTP 200 + success:false for a
-// refusal, masked keys in the list, a challenge page when asked).
+// 测试用的「盒装 New API 站点」：本插件用到的那些接口，
+// 以及 New API 真实发出的信封（拒绝时是 HTTP 200 + success:false、
+// 列表里的 key 是掩码、要求质询时返回质询页）。
 
 import http from "node:http";
 
 let mockSeq = 0;
 
-// One listener per test process, every site a path prefix under it. A fresh
-// server per test churned ephemeral ports (and Windows' TIME_WAIT with them),
-// which showed up as occasional "fetch failed" on a site that was listening.
+// 每个测试进程一个监听器，每个站点是它下面的一个路径前缀。
+// 每个测试都起一个新服务器会不停消耗临时端口（Windows 上还会堆 TIME_WAIT），
+// 表现为明明在监听的站点偶尔报 "fetch failed"。
 const sites = new Map();
 let listening = null;
 let listenerRef = null;
@@ -26,7 +26,7 @@ function listener() {
     }
     site.handle(req, res);
   });
-  // Keep the event loop free to exit once the tests are over.
+  // 让事件循环在测试结束后能正常退出。
   server.unref();
   listenerRef = server;
   listening = new Promise((resolve, reject) => {
@@ -39,7 +39,7 @@ function listener() {
   return listening;
 }
 
-/** Stop the shared listener (tests do not need this; a long-lived process may). */
+/** 关掉共享的监听器（测试不需要；常驻进程可能需要）。 */
 export function shutdownMock() {
   sites.clear();
   if (listenerRef) {
@@ -110,13 +110,13 @@ const GROUPS = {
 };
 
 /**
- * Start a fake New API. Options:
- *   reveal: "allow" | "deny" | "masked"  (token key reveal behaviour)
- *   challenge: "" | "cf" | "turnstile"   (check-in endpoint behaviour)
- *   pricingClosed: bool                  (/api/pricing answers 403)
+ * 起一个假的 New API。可选项：
+ *   reveal: "allow" | "deny" | "masked"  （token key 的 reveal 行为）
+ *   challenge: "" | "cf" | "turnstile"   （签到接口的行为）
+ *   pricingClosed: bool                  （/api/pricing 回 403）
  *   checkinEnabled: bool
- *   turnstileCheck: bool                 (/api/status says Turnstile)
- *   quotaPerUnit, quota, usedQuota
+ *   turnstileCheck: bool                 （/api/status 说需要 Turnstile）
+ *   quotaPerUnit, quota, usedQuota（额度单位、余额、已用额度）
  */
 export async function startNewAPI(options = {}) {
   const state = {
@@ -131,12 +131,11 @@ export async function startNewAPI(options = {}) {
     quota: options.quota ?? 5_000_000,
     usedQuota: options.usedQuota ?? 1_000_000,
     checkedInToday: options.checkedInToday ?? false,
-    // The site's groups and their models, mutable: an operator adds or
-    // removes them, and a test does the same.
+    // 站点的分组及其模型，可变：管理员会增删，测试也一样。
     groups: { ...GROUPS },
     models: { ...GROUP_MODELS },
-    // Some builds (v1.0.0-rc.46) only have /api/user/checkin for both GET
-    // and POST; the self route is a 404 there.
+    // 有些版本（v1.0.0-rc.46）的 GET/POST 都只有 /api/user/checkin，
+    // self 那条路由在它们那里是 404。
     legacyCheckinOnly: options.legacyCheckinOnly ?? false,
     usdExchangeRate: options.usdExchangeRate ?? 7.3,
     checkedIn: [],
@@ -145,13 +144,12 @@ export async function startNewAPI(options = {}) {
     tokens: [
       { id: 1, name: "default", key: DEFAULT_KEY, group: "default", status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
       { id: 2, name: "vip", key: VIP_KEY, group: "vip", status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
-      // svip has no token at all, so a key must be pasted or created.
+      // svip 完全没有 token，所以它的 key 只能手填或新建。
     ],
   };
 
-  // Each site also gets a path prefix of its own: the plugin caches by base
-  // URL, and a later test reusing an ephemeral port must not read an earlier
-  // site's cached status.
+  // 每个站点还各有一个路径前缀：插件按 base URL 缓存，
+  // 后面的测试复用了临时端口时，不能读到前一个站点的缓存。
   const prefix = `/s${++mockSeq}-${Date.now().toString(36)}`;
 
   const handle = async (req, res) => {
@@ -168,7 +166,7 @@ export async function startNewAPI(options = {}) {
     });
 
     if (state.challenge === "cf" && req.headers["x-test-cf"] !== "off") {
-      // A Cloudflare challenge reaches the check-in route first.
+      // Cloudflare 质询先拦在签到路由上。
       if (url.pathname.includes("/checkin")) {
         res.writeHead(403, { "content-type": "text/html", server: "cloudflare" });
         res.end("<!doctype html><title>Just a moment...</title><div id='cf-challenge'></div>");
@@ -302,7 +300,7 @@ export async function startNewAPI(options = {}) {
       };
       state.tokens.push(created);
       state.created.push(created);
-      // New API's AddToken returns no id and no key.
+      // New API 的 AddToken 既不返回 id 也不返回 key。
       json({ success: true, message: "" });
       return;
     }
@@ -402,8 +400,8 @@ export async function startNewAPI(options = {}) {
     }
 
     if (url.pathname === "/api/user/checkin" && req.method === "POST") {
-      // The old path: a real check-in for a legacy-only site, a 404 otherwise
-      // unless a test asks for the old reward shape.
+      // 老路径：只有老布局的站点用来真正签到；其他站点回 404，
+      // 除非测试要求旧版的那个 reward 形状。
       if (!options.legacyCheckin && !state.legacyCheckinOnly) {
         json({ success: false, message: "not found" }, 404);
         return;

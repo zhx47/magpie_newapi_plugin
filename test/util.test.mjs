@@ -52,7 +52,7 @@ test("parseGroupKeys accepts text and JSON", () => {
   assert.deepEqual(parseGroupKeys("vip=sk-a\nvip=sk-c"), { vip: ["sk-a", "sk-c"] });
   assert.deepEqual(parseGroupKeys('{"vip":["sk-a"],"default":"sk-b"}'), { vip: ["sk-a"], default: ["sk-b"] });
   assert.deepEqual(parseGroupKeys("# comment\n\n=sk-x"), {});
-  // masked values are not keys
+  // 掩码值不是 key
   assert.deepEqual(parseGroupKeys("vip=sk-v***0002"), {});
 });
 
@@ -91,7 +91,7 @@ test("quotaInfo and formatQuota follow the site's display", () => {
   assert.equal(custom.symbol, "¤");
   assert.equal(formatQuota(500000, custom), "¤2.00");
 
-  // CNY divides by usd_exchange_rate, not by the custom rate; USD never does.
+  // 人民币用 usd_exchange_rate 换算，不用自定义汇率；美元从不换算。
   const cnyRate = quotaInfo({ quota_per_unit: 500000, display_in_currency: true, quota_display_type: "CNY", usd_exchange_rate: 7.3, custom_currency_exchange_rate: 1 });
   assert.equal(cnyRate.rate, 7.3);
   const usdWithRate = quotaInfo({ quota_per_unit: 500000, display_in_currency: true, quota_display_type: "USD", usd_exchange_rate: 7.3 });
