@@ -32,13 +32,27 @@ export function catalogId(label, group, model, proto, suffix) {
   return `${label}/${group}/${model}${suffix}`;
 }
 
-/** The name Magpie shows: model, group, ratio and protocol. */
-export function displayName(model, group, ratio, proto) {
-  const bits = [model, group];
+/**
+ * The name Magpie shows: account, model, group, ratio and protocol.
+ *
+ * The account comes first because one `newapi` provider holds every site:
+ * with several signed in, a row of `gpt-4o · default` says nothing about
+ * which site or which user it would spend. The group is the second thing
+ * that changes a model's price, so it stays.
+ */
+export function displayName(account, model, group, ratio, proto) {
+  const bits = [];
+  if (account) bits.push(account);
+  bits.push(model, group);
   if (ratio && Number(ratio) > 0) bits.push(`×${ratio}`);
   const label = labelOf(proto);
   if (label) bits.push(label);
   return bits.join(" · ");
+}
+
+/** The account label a model's name leads with: the user, else the site. */
+export function accountLabel(md) {
+  return String(md?.username || md?.displayName || "").trim() || String(md?.siteLabel || "").trim();
 }
 
 /**
@@ -46,13 +60,13 @@ export function displayName(model, group, ratio, proto) {
  * `baseModel`, when the provider already had this id, gives the limits and
  * capabilities Magpie or models.dev knew.
  */
-export function modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel }) {
+export function modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel, account }) {
   const apiId = wireId(group, model);
   const npm = NPM[proto] ?? NPM.chat;
   const url = baseForProtocol(md.baseURL, proto);
   const entry = {
     id: id ?? `${md.siteLabel}/${group}/${model}`,
-    name: displayName(model, group, ratio, proto),
+    name: displayName(account, model, group, ratio, proto),
     api: { id: apiId, url, npm },
     limit: baseModel?.limit ?? { context: 0, output: 0 },
     capabilities: baseModel?.capabilities ?? {
@@ -191,6 +205,7 @@ export function buildModels({ md, groups, pricing, options = {} }) {
     if (info && Number(info.ratio) > 0) ratioByGroup[name] = Number(info.ratio);
   }
 
+  const account = accountLabel(md);
   for (const [group, models] of Object.entries(groups)) {
     if (!Array.isArray(models) || !models.length) continue;
     perGroup[group] = models.length;
@@ -209,7 +224,7 @@ export function buildModels({ md, groups, pricing, options = {} }) {
         const suffix = i === 0 ? "" : protocolSuffix(proto);
         const id = catalogId(md.siteLabel, group, model, proto, suffix);
         const baseModel = options.hostModels?.[`${md.siteLabel}/${group}/${model}`];
-        out[id] = modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel });
+        out[id] = modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel, account });
       }
     }
   }

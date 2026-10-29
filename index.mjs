@@ -10,7 +10,7 @@ import { ChallengeError, isAuthError } from "./src/api.mjs";
 import { blockedResult, offResult, pressCheckin } from "./src/checkin.mjs";
 import { makeFetch } from "./src/fetch.mjs";
 import { buildModels, discover } from "./src/models.mjs";
-import { PROVIDER, signIn, validateAccessToken, validateBase } from "./src/signin.mjs";
+import { PROVIDER, nextQuestion, signIn } from "./src/signin.mjs";
 import { accountOf, caches, groupKeysOf, runtimeMd } from "./src/state.mjs";
 import { buildUsage } from "./src/usage.mjs";
 
@@ -49,70 +49,27 @@ const OPTIONS = [
   },
 ];
 
-/** The methods a user can sign in with. */
+/**
+ * The methods a user can sign in with.
+ *
+ * `keyless: true` is what keeps the access token from being asked twice:
+ * Magpie shows its own "API key" box after the questions of an "api" method
+ * unless the method says its authorize supplies the credential. Ours does —
+ * the token was already asked above — so the extra box is skipped.
+ *
+ * The questions are `ask(inputs)` rather than a static `prompts` list: the
+ * groups are read from the site first, then each group without a key is
+ * asked in a field of its own, titled with its name.
+ */
 const METHODS = [
   {
     type: "api",
     label: "New API access token",
     placeholder: "access token, not sk-...",
-    prompts: [
-      {
-        type: "text",
-        key: "baseURL",
-        message: "New API base URL",
-        placeholder: "https://newapi.example.com",
-        validate: validateBase,
-      },
-      {
-        type: "password",
-        key: "accessToken",
-        message: "Access token",
-        placeholder: "the site's access token (not an sk- key)",
-        validate: validateAccessToken,
-      },
-      {
-        type: "text",
-        key: "userId",
-        message: "User id (old New API only; leave empty)",
-        placeholder: "1",
-      },
-      {
-        type: "text",
-        key: "siteLabel",
-        message: "Site label (the model prefix; empty uses the host)",
-        placeholder: "example",
-      },
-      {
-        type: "text",
-        key: "groupFilter",
-        message: "Only these groups (comma separated; empty means all)",
-        placeholder: "default,vip",
-      },
-      {
-        type: "text",
-        key: "groupKeys",
-        message: "Group keys (optional: vip=sk-...; default=sk-...)",
-        placeholder: "vip=sk-...;default=sk-...",
-      },
-      {
-        type: "select",
-        key: "checkin",
-        message: "Daily check-in",
-        options: [
-          { label: "Automatic", value: "auto" },
-          { label: "Off (check in on the site yourself)", value: "off" },
-        ],
-      },
-      {
-        type: "select",
-        key: "autoCreate",
-        message: "Create API tokens on the site for groups without a key?",
-        options: [
-          { label: "No", value: "no" },
-          { label: "Yes", value: "yes" },
-        ],
-      },
-    ],
+    keyless: true,
+    async ask(inputs) {
+      return nextQuestion(inputs ?? {}, { directory: pluginDirectory() });
+    },
     async authorize(inputs) {
       return signIn(inputs, { directory: pluginDirectory() });
     },

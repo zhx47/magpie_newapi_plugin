@@ -62,8 +62,16 @@ export async function buildUsage(md, opts = {}) {
     .map(([name, v]) => `${name} ×${v.ratio}`)
     .join(", ");
 
+  // `used` is left off every row but the wallet. Magpie reads a window with
+  // a `used` as a share of an allowance: 0 becomes a 0% meter, a trend line
+  // and "not enough data" under it (#2045's HoldsLow), which these rows are
+  // not. Without it the window is text alone, counted by nothing.
   const windows = [
     {
+      // A wallet reading, the shape Magpie's #3950 asks for: the figure and
+      // its unit, no `used`. Not `aside`: an aside window is skipped when
+      // the account's allowance is built, and this balance is what routing
+      // weighs a prepaid account by.
       name: "Balance",
       balance: quotaAsNumber(self.quota, info),
       unit: quotaUnit(info),
@@ -71,12 +79,10 @@ export async function buildUsage(md, opts = {}) {
     },
     {
       name: "Used",
-      used: 0,
       display: `${formatQuota(self.usedQuota, info)} used · ${Number(self.requestCount || 0).toLocaleString("en-US")} requests`,
     },
     {
       name: "Groups",
-      used: 0,
       display: ratio ? `${groupList} (${ratio})` : groupList,
     },
   ];
@@ -86,13 +92,12 @@ export async function buildUsage(md, opts = {}) {
   if (pending.length) {
     windows.push({
       name: "Missing keys",
-      used: 0,
-      display: `${pending.join(", ")} — sign in again and paste the group key`,
+      display: `${pending.join(", ")} — sign in again to add them`,
     });
   }
 
   if (md.checkin === "off") {
-    windows.push({ name: "Check-in", used: 0, display: "Auto check-in off · check in on the site" });
+    windows.push({ name: "Check-in", display: "Auto check-in off · check in on the site" });
   }
 
   // No signIn: a clean read clears a lapse mark, which is what a working

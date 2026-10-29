@@ -5,7 +5,12 @@
 // /api/*) and per-group API keys (the `sk-...` a relay request carries).
 // This hook collects both:
 //   - the token, for the account's identity, balance and check-in;
-//   - every group key it can find or reveal, plus whatever the user pasted.
+//   - every group key it can find or reveal;
+//   - then, group by group, whatever is still missing, one question each.
+//
+// The questions are Magpie's `ask(inputs)` hook on the method: it may look
+// things up between questions, so the groups can be read from the site
+// first and each one asked by name instead of one text field to splice.
 //
 // It never fails because a management endpoint is closed: a site whose
 // /api/pricing is root-only still signs in, and its models come from
@@ -26,13 +31,15 @@ import {
   cleanLabel,
   hashKey,
   hostOf,
+  isMaskedKey,
   mergeGroupKeys,
+  normalizeApiKey,
   normalizeBase,
   parseGroupFilter,
   parseGroupKeys,
   sortGroups,
 } from "./util.mjs";
-import { readCachedKeys, writeCachedKeys } from "./state.mjs";
+import { TtlCache, cacheKey, readCachedKeys, readCachedKeysForSite, writeCachedKeys } from "./state.mjs";
 
 const PROVIDER = "newapi";
 
@@ -80,7 +87,7 @@ function keyInfoOf(tokens, revealed) {
   return info;
 }
 
-/** Whether a token has a content-significant title to find again by name. */
+/** A token name to find a created token again by. */
 function tokenName(label, group, stamp) {
   const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
   return `magpie-${cleanLabel(label, "site")}-${safe}-${stamp}`.slice(0, 50);
@@ -119,17 +126,17 @@ export async function ensureKeys({ base, token, userId, label, groups, fetchImpl
   return created;
 }
 
-/**
- * The whole sign-in. `directory` is Magpie's config dir, where the key
- * cache lives; `client` is only used by later hooks, not here.
- */
-export async function signIn(inputs, { directory, fetchImpl } = {}) {
+// The questions run one per call, and each needs the site's groups: without
+// this, a sign-in with three missing groups read six endpoints four times.
+const surveys = new TtlCache(60_000);
+
+/** What the first calls found out: used by the questions and the result alike. */
+async function surveyOnce(inputs, fetchImpl) {
   const base = normalizeBase(inputs?.baseURL);
   const token = String(inputs?.accessToken ?? "").trim();
-  if (!base) return { type: "failed", error: "Enter the site's base URL, e.g. https://newapi.example.com" };
-  if (!token) return { type: "failed", error: "Enter the site's access token (not an sk- API key)" };
-
   const userId = String(inputs?.userId ?? "").trim();
+  if (!base) return { failed: "Enter the site's base URL, e.g. https://newapi.example.com" };
+  if (!token) return { failed: "Enter the site's access token (not an sk- API key)" };
 
   let status = null;
   try {
@@ -145,44 +152,23 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
   } catch (e) {
     if (isAuthError(e)) {
       return {
-        type: "failed",
-        error: userId
+        failed: userId
           ? `The site refused the access token (${describe(e)}). Check the token, and the user id.`
           : `The site refused the access token (${describe(e)}). Older New API needs your user id — fill the User id field.`,
       };
     }
     // A network blip must not lose the sign-in: keep what the user typed and
     // let the next listing fail loudly instead. A site that cannot be reached
-    // at all is different — nothing about the token was checked, so say so
-    // rather than sign in to nothing.
+    // at all is different: nothing about the token was checked.
     unreachable = e?.status === 0;
     self = { id: Number(userId) || 0, username: "", group: "", quota: 0, usedQuota: 0, requestCount: 0 };
   }
 
-  const label = cleanLabel(inputs?.siteLabel, hostOf(base));
-  const accountId = `${label} (${self.username || self.id || userId || "user"})`;
-  const filter = parseGroupFilter(inputs?.groupFilter);
-
-  let groups = {};
-  try {
-    groups = await getUserGroups(base, token, userId, { fetchImpl });
-  } catch {
-    groups = {};
-  }
-
-  let pricing = null;
-  try {
-    pricing = await getPricing(base, token, userId, { fetchImpl });
-  } catch {
-    pricing = null;
-  }
-
-  let tokens = [];
-  try {
-    tokens = await listTokens(base, token, userId, { fetchImpl });
-  } catch {
-    tokens = [];
-  }
+  const [groups, pricing, tokens] = await Promise.all([
+    getUserGroups(base, token, userId, { fetchImpl }).catch(() => ({})),
+    getPricing(base, token, userId, { fetchImpl }).catch(() => null),
+    listTokens(base, token, userId, { fetchImpl }).catch(() => []),
+  ]);
 
   const byGroup = tokensByGroup(tokens, self.group);
   let revealed = new Map();
@@ -201,21 +187,188 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
     }
   }
 
-  const manual = parseGroupKeys(inputs?.groupKeys);
+  return { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens };
+}
+
+/** survey, kept for a minute under the answers it was made from. */
+function survey(inputs, fetchImpl) {
+  const base = normalizeBase(inputs?.baseURL);
+  const token = String(inputs?.accessToken ?? "").trim();
+  if (!base || !token) return surveyOnce(inputs, fetchImpl);
+  const key = cacheKey(base, "signin", token, String(inputs?.userId ?? ""));
+  return surveys.getOr(key, 60_000, () => surveyOnce(inputs, fetchImpl));
+}
+
+/** The groups a site serves that still need a key, in the order they are asked. */
+function pendingGroupsOf(found, inputs, cachedKeys) {
+  const filter = parseGroupFilter(inputs?.groupFilter);
+  const known = new Set([
+    ...Object.keys(found.groups ?? {}),
+    ...Object.keys(found.byGroup ?? {}),
+    ...Object.keys(cachedKeys),
+    ...Object.keys(parseGroupKeys(inputs?.groupKeys)),
+  ]);
+  const wanted = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
+  const have = mergeGroupKeys(cachedKeys, found.fromTokens, parseGroupKeys(inputs?.groupKeys));
+  return sortGroups(wanted.filter((g) => !have[g]?.length));
+}
+
+/**
+ * The questions after the first three, as Magpie asks them one at a time.
+ * Each missing group is its own field, titled with its name; asking again
+ * asks the one after it, since a question answered is passed back in.
+ */
+export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
+  // The first questions need no lookup.
+  if (!inputs?.baseURL) return prompt("baseURL");
+  if (!inputs?.accessToken) return prompt("accessToken");
+  if (inputs?.userId === undefined) return prompt("userId");
+  if (inputs?.siteLabel === undefined) return prompt("siteLabel");
+
+  const found = await survey(inputs, fetchImpl);
+  if (found.failed) {
+    // A bad token: ask it again rather than going on to questions that
+    // cannot be answered without one.
+    return { ...prompt("accessToken"), message: `${found.failed}\nAccess token` };
+  }
+
+  const cached = directory
+    ? readCachedKeys(directory, found.base, found.self.id || found.userId, found.self.username)
+    : { groupKeys: {} };
+  const siteCached = directory ? readCachedKeysForSite(directory, found.base) : {};
+  let pending = pendingGroupsOf(found, inputs, mergeGroupKeys(siteCached, cached.groupKeys));
+  const autoCreate = inputs?.autoCreate === "yes";
+  const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
+
+  // A site with a handful of groups needs no filter question; one with many
+  // does, or every group is a model namespace in the picker.
+  if (allGroups > 6 && inputs?.groupFilter === undefined) {
+    return {
+      type: "text",
+      key: "groupFilter",
+      message: `Only some groups? This site has ${allGroups} (comma separated; empty means all)`,
+      placeholder: [...Object.keys(found.groups ?? {})].slice(0, 4).join(","),
+    };
+  }
+
+  if (pending.length && !autoCreate) {
+    // One group at a time. The answer is kept under groupkey:<group>, so a
+    // group already answered is not asked again and the next one follows.
+    for (const group of pending) {
+      const at = inputKey(group);
+      if (typeof inputs?.[at] === "string") continue;
+      return {
+        type: "password",
+        key: at,
+        message: `API key for group "${group}"`,
+        placeholder: "sk-... (leave empty to skip this group)",
+      };
+    }
+  }
+
+  if (inputs?.checkin === undefined) return prompt("checkin");
+  if (inputs?.autoCreate === undefined) {
+    return {
+      type: "select",
+      key: "autoCreate",
+      message: pending.length
+        ? `Create API tokens on the site for ${pending.length} group${pending.length === 1 ? "" : "s"} without a key?`
+        : "Create API tokens on the site when a group has no key?",
+      options: [
+        { label: "No, skip them", value: "no" },
+        { label: "Yes, create a token for each", value: "yes" },
+      ],
+    };
+  }
+  return null;
+}
+
+const FIRST_PROMPTS = {
+  baseURL: {
+    type: "text",
+    key: "baseURL",
+    message: "New API base URL",
+    placeholder: "https://newapi.example.com",
+    validate: validateBase,
+  },
+  accessToken: {
+    type: "password",
+    key: "accessToken",
+    message: "Access token",
+    placeholder: "the site's access token (not an sk- key)",
+    validate: validateAccessToken,
+  },
+  userId: {
+    type: "text",
+    key: "userId",
+    message: "User id (old New API only; leave empty)",
+    placeholder: "1",
+  },
+  siteLabel: {
+    type: "text",
+    key: "siteLabel",
+    message: "Site label (the model prefix; empty uses the host)",
+    placeholder: "example",
+  },
+  checkin: {
+    type: "select",
+    key: "checkin",
+    message: "Daily check-in",
+    options: [
+      { label: "Automatic", value: "auto" },
+      { label: "Off (check in on the site yourself)", value: "off" },
+    ],
+  },
+};
+
+function prompt(key) {
+  return { ...FIRST_PROMPTS[key] };
+}
+
+/** The input key a group's pasted key is kept under. */
+export function inputKey(group) {
+  return `groupkey:${group}`;
+}
+
+/** The keys pasted in the per-group questions, as groupKeys. */
+export function pastedKeys(inputs) {
+  const out = {};
+  for (const [key, value] of Object.entries(inputs ?? {})) {
+    if (!key.startsWith("groupkey:")) continue;
+    const group = key.slice("groupkey:".length);
+    const k = normalizeApiKey(value);
+    if (group && k && !isMaskedKey(k)) out[group] = [k];
+  }
+  return out;
+}
+
+/**
+ * The whole sign-in. `directory` is Magpie's config dir, where the key
+ * cache lives.
+ */
+export async function signIn(inputs, { directory, fetchImpl } = {}) {
+  const found = await survey(inputs, fetchImpl);
+  if (found.failed) return { type: "failed", error: found.failed };
+  const { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens } = found;
+
+  const label = cleanLabel(inputs?.siteLabel, hostOf(base));
+  const accountId = `${label} (${self.username || self.id || userId || "user"})`;
+  const filter = parseGroupFilter(inputs?.groupFilter);
+
+  // Keys pasted one group at a time are the freshest, so they win over a
+  // cache; the older free-form field still works for anyone used to it.
+  const manual = mergeGroupKeys(parseGroupKeys(inputs?.groupKeys), pastedKeys(inputs));
   const cached = directory ? readCachedKeys(directory, base, self.id || userId, self.username) : { groupKeys: {} };
   let groupKeys = mergeGroupKeys(cached.groupKeys, fromTokens, manual);
 
-  // Groups the site lists but Magpie has no key for. A filter names the
-  // groups the user wants; a key for a group outside it is left out with
-  // the rest, so the account holds only what was asked for.
+  // A filter names the groups the user wants; a key for a group outside it
+  // is left out with the rest, so the account holds only what was asked for.
   if (filter.length) {
     for (const group of Object.keys(groupKeys)) {
       if (!filter.includes(group)) delete groupKeys[group];
     }
   }
-  // The groups the site knows: /api/user/self/groups when it answered, plus
-  // the ones the token list and the pasted keys name. A site whose group
-  // endpoint hiccupped still reports what it can, rather than "none".
+
   const known = new Set([
     ...Object.keys(groups ?? {}),
     ...Object.keys(byGroup ?? {}),
@@ -224,15 +377,9 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
   const siteGroups = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
   let pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
 
-  if (pending.length && inputs?.autoCreate === "yes") {
-    const created = await ensureKeys({
-      base,
-      token,
-      userId,
-      label,
-      groups: pending,
-      fetchImpl,
-    });
+  const autoCreate = inputs?.autoCreate === "yes";
+  if (pending.length && autoCreate) {
+    const created = await ensureKeys({ base, token, userId, label, groups: pending, fetchImpl });
     if (Object.keys(created).length) {
       groupKeys = mergeGroupKeys(groupKeys, created);
       pending = sortGroups(siteGroups.filter((g) => !groupKeys[g]?.length));
@@ -247,6 +394,7 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
+  // Kept even when a group is still missing: a second sign-in picks up here.
   if (directory) writeCachedKeys(directory, base, self.id || userId, self.username, groupKeys);
 
   const keyInfo = keyInfoOf(tokens, revealed);
@@ -261,6 +409,7 @@ export async function signIn(inputs, { directory, fetchImpl } = {}) {
       baseURL: base,
       userId: self.id || Number(userId) || undefined,
       username: self.username || "",
+      displayName: self.displayName || "",
       siteLabel: label,
       defaultGroup: self.group || Object.keys(groupKeys)[0] || "default",
       groupFilter: filter.join(","),

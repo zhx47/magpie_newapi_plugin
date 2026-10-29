@@ -43,36 +43,76 @@ test("the module exports one plugin function, as host.js's servers() reads it", 
   assert.deepEqual(Object.keys(plugin).sort(), ["id", "server"]);
 });
 
-test("auth declares one API-key method with the prompts the docs describe", () => {
-  return (async () => {
-    const { site, instance, close } = await setup();
-    try {
-      const auth = instance.auth;
-      assert.equal(auth.provider, "newapi");
-      assert.equal(auth.methods.length, 1);
-      assert.equal(auth.methods[0].type, "api");
-      const keys = auth.methods[0].prompts.map((p) => p.key);
-      assert.deepEqual(keys, ["baseURL", "accessToken", "userId", "siteLabel", "groupFilter", "groupKeys", "checkin", "autoCreate"]);
-      // Every prompt has a type and a message; the check-in has both choices.
-      for (const p of auth.methods[0].prompts) {
-        assert.ok(p.type, `${p.key} has a type`);
-        assert.ok(p.message, `${p.key} has a message`);
-      }
-      const checkin = auth.methods[0].prompts.find((p) => p.key === "checkin");
-      assert.deepEqual(
-        checkin.options.map((o) => o.value),
-        ["auto", "off"],
-      );
-      // The options are boolean switches with defaults.
-      assert.ok(auth.options.length >= 4);
-      for (const o of auth.options) {
-        assert.equal(typeof o.default, "boolean");
-        assert.ok(o.label);
-      }
-    } finally {
-      await site.close();
+test("auth declares one keyless API method that asks its own questions", async () => {
+  const { site, instance } = await setup();
+  try {
+    const auth = instance.auth;
+    assert.equal(auth.provider, "newapi");
+    assert.equal(auth.methods.length, 1);
+    const m = auth.methods[0];
+    assert.equal(m.type, "api");
+    // keyless is what stops Magpie from asking for an "API key" after the
+    // token: the access token was already the token question.
+    assert.equal(m.keyless, true);
+    assert.equal(typeof m.ask, "function");
+    assert.equal(typeof m.authorize, "function");
+
+    // The questions, in order, as Magpie walks them.
+    const asked = async (inputs) => m.ask(inputs);
+    const q1 = await asked({});
+    assert.equal(q1.key, "baseURL");
+    assert.equal(q1.type, "text");
+    const q2 = await asked({ baseURL: site.base });
+    assert.equal(q2.key, "accessToken");
+    assert.equal(q2.type, "password");
+    const q3 = await asked({ baseURL: site.base, accessToken: ACCESS_TOKEN });
+    assert.equal(q3.key, "userId");
+
+    // The options are boolean switches with defaults.
+    assert.ok(auth.options.length >= 4);
+    for (const o of auth.options) {
+      assert.equal(typeof o.default, "boolean");
+      assert.ok(o.label);
     }
-  })();
+  } finally {
+    await site.close();
+  }
+});
+
+test("the missing group is asked by name, one field per group", async () => {
+  // reveal denied and nothing pasted: default and vip are missing.
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+    const head = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "" };
+
+    const q1 = await ask(head);
+    assert.match(q1.key, /^groupkey:/);
+    assert.match(q1.message, /"default"/);
+    assert.equal(q1.type, "password");
+
+    // Answer that one: the next question is another group, never the same.
+    const q2 = await ask({ ...head, [q1.key]: "sk-pasted-default-1" });
+    assert.match(q2.key, /^groupkey:/);
+    assert.notEqual(q2.key, q1.key);
+
+    const q3 = await ask({ ...head, [q1.key]: "sk-pasted-default-1", [q2.key]: "sk-pasted-vip-2" });
+    assert.match(q3.key, /^groupkey:/);
+    assert.notEqual(q3.key, q1.key);
+    assert.notEqual(q3.key, q2.key);
+
+    // Every group answered: the check-in switch follows, then autoCreate.
+    const answered = { ...head, [q1.key]: "sk-pasted-default-1", [q2.key]: "sk-pasted-vip-2", [q3.key]: "sk-pasted-svip-3" };
+    const q4 = await ask(answered);
+    assert.equal(q4.key, "checkin");
+    const q5 = await ask({ ...answered, checkin: "auto" });
+    assert.equal(q5.key, "autoCreate");
+    assert.equal(await ask({ ...answered, checkin: "auto", autoCreate: "no" }), null);
+  } finally {
+    await site.close();
+  }
 });
 
 test("provider.models answers per account, with protocols and group namespaces", async () => {
@@ -257,4 +297,51 @@ test("the config hook leaves the user's provider settings alone", async () => {
   await instance.config(fresh);
   assert.equal(fresh.provider.newapi.name, "New API");
   assert.equal(fresh.provider.newapi.npm, "@ai-sdk/openai-compatible");
+});
+
+test("the method is keyless so Magpie does not ask for the token twice", async () => {
+  // Magpie shows its own "API key" box after an api method's questions
+  // unless the method is keyless (gui: ms[method].keyless). Without it the
+  // access token was typed, then asked again under the method's label.
+  const { site, instance } = await setup();
+  try {
+    const m = instance.auth.methods[0];
+    assert.equal(m.type, "api");
+    assert.equal(m.keyless, true, "keyless is what skips Magpie's own key box");
+    assert.equal(typeof m.authorize, "function");
+  } finally {
+    await site.close();
+  }
+});
+
+test("model names lead with the account so sites are told apart", async () => {
+  const { site, instance, auth } = await setup();
+  try {
+    const models = await instance.provider.models({ models: {} }, { auth });
+    const one = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-5"));
+    assert.ok(one, "the model is listed");
+    // "<user> · <model> · <group> · <ratio> · <protocol>"
+    assert.match(one.name, /^alice · gpt-5 · vip/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("the usage rows that are text carry no share", async () => {
+  const { site, instance, getAuth } = await setup();
+  try {
+    const usage = await instance.auth.usage(getAuth);
+    for (const name of ["Used", "Groups"]) {
+      const w = usage.windows.find((x) => x.name === name);
+      assert.ok(w, `${name} is there`);
+      assert.equal(w.used, undefined, `${name} must not claim a 0% share`);
+      assert.ok(w.display, `${name} says its text`);
+    }
+    // The wallet is a reading, not a share: balance with no used.
+    const balance = usage.windows.find((x) => x.name === "Balance");
+    assert.equal(balance.used, undefined);
+    assert.equal(typeof balance.balance, "number");
+  } finally {
+    await site.close();
+  }
 });

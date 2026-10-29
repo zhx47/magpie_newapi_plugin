@@ -316,7 +316,9 @@ test("usage shows the balance as a wallet and spend as text", async () => {
     assert.equal(balance.unit, "$");
     assert.equal(balance.display, "$10.00 left");
     const used = usage.windows.find((w) => w.name === "Used");
-    assert.equal(used.used, 0);
+    // No `used`: a share of 0 would make Magpie draw a 0% meter and a trend
+    // for a row that is text alone.
+    assert.equal(used.used, undefined);
     assert.match(used.display, /1,234 requests/);
     const groups = usage.windows.find((w) => w.name === "Groups");
     assert.match(groups.display, /vip/);

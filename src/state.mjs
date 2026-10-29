@@ -191,6 +191,26 @@ export function readCachedKeys(directory, base, userId, username) {
   return { groupKeys: clean, at: String(entry?.updatedAt ?? "") };
 }
 
+/**
+ * Every key kept for a site, whichever account of it: sign-in asks for the
+ * groups still missing a key before it knows which user the token belongs
+ * to, and a second account of one site shares none of them.
+ */
+export function readCachedKeysForSite(directory, base) {
+  const all = readCacheFile(directory);
+  const out = {};
+  for (const [id, entry] of Object.entries(all)) {
+    if (!id.startsWith(`${base}|`)) continue;
+    const keys = entry?.groupKeys;
+    if (!keys || typeof keys !== "object") continue;
+    for (const [group, value] of Object.entries(keys)) {
+      const list = (Array.isArray(value) ? value : [value]).map(normalizeApiKey).filter((k) => k && !isMaskedKey(k));
+      if (list.length) (out[group] ??= []).push(...list);
+    }
+  }
+  return mergeGroupKeys(out);
+}
+
 /** Merge keys into the cache for a site account. Never throws. */
 export function writeCachedKeys(directory, base, userId, username, groupKeys) {
   if (!groupKeys || !Object.keys(groupKeys).length) return;

@@ -17,16 +17,22 @@ magpie plugin login newapi
 
 ## 登录时要填什么
 
-| 字段 | 说明 |
-| --- | --- |
-| Base URL | `https://newapi.example.com`；`/v1`、`/api`、末尾 `/` 会被归一化掉。 |
-| Access token | 站点「个人设置 → 访问令牌」里的 token。**不是** `sk-...` 推理 key；填了 `sk-` 会被提示改写。 |
-| User id | 只有老版本 New API / AnyRouter 需要；新版本留空。 |
-| Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
-| Only these groups | 只同步这些分组，逗号分隔；空 = 全部。 |
-| Group keys | 可选，`vip=sk-...;default=sk-...` 或 JSON，用于站点不允许读取完整 key 时手动回填。 |
-| Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
-| Create tokens | 是否允许插件在站点上为缺 key 的分组自动创建 token（需要 `api_key:edit` 权限）。 |
+登录是**一问一答**的：前面的答案会被用来查询站点，后面的问题据此生成。
+
+| 顺序 | 字段 | 说明 |
+| --- | --- | --- |
+| 1 | Base URL | `https://newapi.example.com`；`/v1`、`/api`、末尾 `/` 会被归一化掉。 |
+| 2 | Access token | 站点「个人设置 → 访问令牌」里的 token。**不是** `sk-...` 推理 key；填了 `sk-` 会被提示改写。**这是唯一一次要求填 token**。 |
+| 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
+| 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
+| 5 | Group filter | 只在站点有 **7 个以上分组**时才问；更少就不打扰。 |
+| 6… | **每个缺 key 的分组一个输入框** | 标题直接写 `API key for group "vip"`，一次填一个；留空表示跳过这个分组。已经能从站点读到的 key 不会再问。 |
+| 7 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
+| 8 | Create tokens | 是否允许插件在站点上为仍缺 key 的分组自动创建 token（需要 `api_key:edit` 权限）。 |
+
+为什么不再用一行文本框拼 `vip=sk-...;default=sk-...`：分组名和 key 都要手写，容易错位，而且不知道到底缺哪个。现在每个分组一个字段，标题就是分组名。
+
+**补 key 不需要重新登录也可以**：再次运行 `magpie plugin login newapi`，已保存的 key 从缓存读回，只会问仍然缺的那些分组。
 
 ## 模型 ID 的含义
 
@@ -35,7 +41,9 @@ newapi/<siteLabel>/<group>/<model>
 ```
 
 - `example.com/default/gpt-4o` 和 `example.com/vip/gpt-4o` 是**两个模型**：同一个名字在不同分组里不冲突。
-- 分组倍率会显示在名字里：`gpt-4o · vip · ×0.8`。
+- 模型名以**账号**开头，因为多个站点共用一个 `newapi` 供应商：
+  `alice · gpt-5 · vip · ×0.8 · Responses`
+  依次是：账号（用户名，没有则站点名）、模型、分组、分组倍率、协议（chat 不显示）。
 - 默认每个模型只用一种协议，按模型类型选：
   - Claude 类 → Anthropic Messages（保留 thinking / cache_control）
   - GPT-5 / Codex / o 系 → OpenAI Responses
@@ -49,8 +57,10 @@ newapi/<siteLabel>/<group>/<model>
 
 1. 读 `/api/token/` 的 token 列表（站点返回的 key 是掩码）；
 2. 用 `/api/token/batch/keys` 或 `/api/token/:id/key` 取回完整 key；
-3. 取不到就保留你贴的 `Group keys`，并用 `<Magpie 配置目录>/newapi-keys.json` 缓存，重登不会丢；
-4. 仍缺 key 的分组会出现在用量卡片的 **Missing keys** 窗口里，提示你重新登录回填。
+3. 取不到就保留你逐个输入的 key，并用 `<Magpie 配置目录>/newapi-keys.json` 缓存，重登不会丢；
+4. 仍缺 key 的分组会出现在用量卡片的 **Missing keys** 里，提示你重新登录补上。
+
+补 key 的流程：`magpie plugin login newapi` → 填 base URL 和 access token（或直接回车用缓存）→ 插件只问仍然缺的那些分组，一个分组一个输入框。
 
 站点不允许读取 key（403 / 安全验证）时，手动回填是唯一的办法；插件不会尝试绕过。
 
@@ -59,7 +69,8 @@ newapi/<siteLabel>/<group>/<model>
 ## 余额与签到
 
 - 余额：`/api/user/self` 的 `quota`，按 `/api/status` 的 `quota_per_unit` 换算（默认 500000 quota = $1）。站点关闭货币显示时按原始 quota 显示。
-- 用量卡片还会显示已用额度、请求数、分组倍率、缺失 key。
+- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Missing keys」是纯文本行，不会画进度条，也不会显示 `0%`。
+  （Magpie 把带 `used` 的窗口当比例；这些行不发送 `used`，所以不会被误画成 0%。）
 - 签到：`/api/user/self/checkin`，旧版本回退 `/api/user/checkin`。
 
 ### 签到开关与 Cloudflare
@@ -101,6 +112,7 @@ newapi/<siteLabel>/<group>/<model>
 ## 限制
 
 - **一个 provider**：所有站点都挂在 `newapi` 下，站点体现在账号和模型 ID 里。Magpie 的 `auth.provider` 是静态的，无法每个站点动态生成 Provider 卡片。
+- **`siteLabel` 必须区分同一站点的多个账号**。模型 ID 是 `<siteLabel>/<group>/<model>`，同一站点第二个账号若沿用同一个 `siteLabel`，两者的模型 ID 会完全相同，Magpie 按 ID 合并账号的模型表时后一个会被前一个盖住。登录同一站点的第二个账号时，把 `siteLabel` 填成能区分的值，例如 `example.com` 和 `example.com-bob`（不填也不会撞，因为默认 label 是 host，但两个账号配同一个显式 label 就会）。
 - **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。
@@ -147,7 +159,7 @@ npm run live
 - `newapi-keys.json`、`plugin-auth.json`
 - 真实站点地址、账号名、令牌（含掩码片段）、余额与签到额度
 
-`npm run scan` 会检查这些：access token（`nap_...`）、`sk-...`、GitHub/AWS/Slack token、私钥块、`NEWAPI_*` 被填了真实值、以及非示例邮箱。测试夹具（`test-access-token-...`、`sk-default-key-...` 等）有明确的允许列表。CI 也会跑它，泄漏会直接让构建失败。
+`npm run scan` 会检查这些：access token（`nap_...`）、`sk-...`、GitHub/AWS/Slack token、私钥块、`NEWAPI_*` 被填了真实值、以及非示例邮箱。它还会读本地 `.env`，把里面的 token、站点 host、user id 按**值**在全部文件里搜一遍——所以真实域名或用户名不会出现在仓库里，却也拦得住。测试夹具（`test-access-token-...`、`sk-default-key-...` 等）有明确的允许列表。CI 也会跑它，泄漏会直接让构建失败。
 
 发布前：
 

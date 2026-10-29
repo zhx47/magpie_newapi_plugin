@@ -179,7 +179,7 @@ Octopus 的做法：
 | 站点（baseURL + access token + 可选 user id） | 插件账号（provider `newapi` 的一个 account） | 一个站点一个账号；余额/签到/模型发现都按账号。 |
 | 用户分组（`default`、`vip`、`svip`、`auto`） | 模型 ID 的命名空间 | `<siteLabel>/<group>/<model>`；不建独立账号。 |
 | 分组 key（`sk-...`） | 账号 metadata 里的 `groupKeys` | 不进 Magpie 的 key 池；由插件 fetch 按分组选。 |
-| 模型 + 支持的端点 | Magpie 模型条目 | 每个条目独立 `api.npm`/`api.url`/`api.id`。 |
+| 模型 + 支持的端点 | Magpie 模型条目 | 每个条目独立 `api.npm`/`api.url`/`api.id`；显示名以账号开头：`<user> · <model> · <group> · ×<ratio> · <proto>`。 |
 | access token | 账号的 `key` + `metadata` | `key` 用于账号身份；fetch 不把它发到推理接口。 |
 | 余额/已用/请求数 | `auth.usage` 的窗口 | 用 `balance`（钱包）+ `display`（文本）。 |
 | 每日签到 | `auth.checkin` | 映射 NewAPI 的 `success`/message。 |
@@ -485,20 +485,18 @@ windows = [
     display: "$12.34 left",
   },
   {
+    // 不带 used：带 used 的窗口会被 Magpie 当成比例，0 会画成 0% 进度条
     name: "Used",
-    used: 0,                 // 0 + display = 纯文本窗口
     display: "$2.00 used · 1,234 requests",
   },
   {
     name: "Groups",
-    used: 0,
     display: "default ×1, vip ×0.8, svip ×0.6",
   },
   // 仅在有关键缺失时出现
   {
     name: "Missing keys",
-    used: 0,
-    display: "svip — sign in again with group keys",
+    display: "svip — sign in again to add them",
   },
 ];
 ```
@@ -607,16 +605,20 @@ async function markBlocked(client, auth, md, kind) {
 
 **登录 method**（`type: "api"`）：
 
-| prompt | 类型 | 必填 | 说明 |
+登录用 **`ask(inputs)` 动态提问**（Magpie 自己的钩子），不是静态 `prompts` 列表：前面的答案用于查询站点，后面的问题据此生成。
+
+| 顺序 | key | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `baseURL` | text | 是 | `https://example.com`、`https://example.com/v1` 都可以；插件归一化。 |
-| `accessToken` | password | 是 | NewAPI 的“系统访问令牌”/PAT；不是 `sk-...` 推理 key。 |
-| `userId` | text | 否 | 老版本/AnyRouter 需要；新版本留空。 |
-| `siteLabel` | text | 否 | 模型命名空间前缀；默认 host。多用户同站点建议 `host@user`。 |
-| `groupFilter` | text | 否 | 只同步这些分组（逗号分隔）；空 = 全部。注意不要用 `groups` 作为 prompt key，否则会被 `metadata.groups`（分组对象）覆盖。 |
-| `groupKeys` | text | 否 | 手动回填：`vip=sk-...;default=sk-...` 或 JSON。 |
-| `checkin` | select | 是 | `Auto`（默认）/ `Off`。`Off` 时不自动签到，适合有 Cloudflare 质询、只能手动签到的站点。 |
-| `autoCreate` | select | 否 | 首次登录时是否允许在站点上自动创建缺失分组的 token（Yes/No，默认 No）。Provider 选项 `autoCreateKeys` 控制后续刷新；首次登录时 provider 还没出现，选项设置不了，所以需要这个 prompt。 |
+| 1 | `baseURL` | text | `https://example.com`、`.../v1` 都可以；插件归一化。 |
+| 2 | `accessToken` | password | NewAPI 的“系统访问令牌”/PAT；不是 `sk-...` 推理 key。**只问这一次**（方法声明 `keyless: true`，否则 Magpie 会在问题之后再弹一个 API key 框）。 |
+| 3 | `userId` | text | 老版本/AnyRouter 需要；新版本留空。 |
+| 4 | `siteLabel` | text | 模型命名空间前缀；默认 host。 |
+| 5 | `groupFilter` | text | **仅在站点有 7 个以上分组时**才问。 |
+| 6… | `groupkey:<group>` | password | 每个仍缺 key 的分组一个输入框，标题写 `API key for group "vip"`；留空 = 跳过该分组。已从站点读到的 key 不再问。 |
+| 7 | `checkin` | select | `Auto`（默认）/ `Off`。 |
+| 8 | `autoCreate` | select | 是否让插件为仍缺 key 的分组创建 token（默认 No）。 |
+
+`ask` 每问一次都会重新判断，所以“已回答”的分组不会重复问。中间结果用 60 秒的 `survey` 缓存，避免每问一次都重读六个端点。
 
 **Provider options**（布尔）：
 
@@ -1089,8 +1091,8 @@ async function readUsage(getAuth) {
 }
 ```
 
-- `balance` 窗口不要同时写 `used`/`limit`，否则 Magpie 会当成百分比窗口。
-- 文本窗口用 `used: 0` + `display`；Magpie 会显示为纯文本。
+- `balance` 窗口不要写 `used`/`limit`。
+- **文本窗口一定不能带 `used`**（包括 `used: 0`）。`quotaOfPlugin` 只在 `used` 缺失时才把它当纯文本；带了 `used: 0` 就是一个真实的 0%，会画进度条、画趋势线，并附上 “Whole: not enough data”。
 - 如果 `display_in_currency=false`，`unit="quota"`；`balance` 用 raw quota。
 - 对于 access token 401/403：`return { error: "...", signIn: "kept" }`，并让 `provider.models` 走 `/v1/models` fallback。
 
