@@ -314,16 +314,68 @@ test("the method is keyless so Magpie does not ask for the token twice", async (
   }
 });
 
-test("model names lead with the account so sites are told apart", async () => {
+test("a model's id is the site, the group and the model", async () => {
   const { site, instance, auth } = await setup();
   try {
     const models = await instance.provider.models({ models: {} }, { auth });
-    const one = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-5"));
-    assert.ok(one, "the model is listed");
-    // "<user> · <model> · <group> · <ratio> · <protocol>"
-    assert.match(one.name, /^alice · gpt-5 · vip/);
+    const id = Object.keys(models).find((k) => k.endsWith("/vip/gpt-5"));
+    assert.ok(id, "the model is listed");
+    // `<siteLabel>/<group>/<model>`; Magpie shows it as newapi/<id>
+    const [label, group, model] = id.split("/");
+    assert.equal(label, auth.metadata.siteLabel, "the site label");
+    assert.equal(group, "vip");
+    assert.equal(model, "gpt-5");
   } finally {
     await site.close();
+  }
+});
+
+test("model names read model · site · group · ratio · protocol", async () => {
+  const { site, instance, auth } = await setup();
+  try {
+    const models = await instance.provider.models({ models: {} }, { auth });
+    const siteLabel = auth.metadata.siteLabel;
+    // A Responses model names its protocol; a chat model leaves it out.
+    const responses = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-5"));
+    assert.equal(responses.name, `gpt-5 · ${siteLabel} · vip · ×0.8 · Responses`);
+    const chat = Object.values(models).find((m) => m.id.endsWith("/vip/gpt-4o"));
+    assert.equal(chat.name, `gpt-4o · ${siteLabel} · vip · ×0.8`);
+  } finally {
+    await site.close();
+  }
+});
+
+test("two accounts of one site share a model id on purpose", async () => {
+  const a = await startNewAPI();
+  const b = await startNewAPI();
+  try {
+    const dirA = tmpdir();
+    const dirB = tmpdir();
+    const signedA = await signIn({ baseURL: a.base, accessToken: ACCESS_TOKEN, siteLabel: "42API" }, { directory: dirA });
+    const signedB = await signIn({ baseURL: b.base, accessToken: ACCESS_TOKEN, siteLabel: "42API" }, { directory: dirB });
+    const instance = await NewAPI({ directory: dirA, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const modelsA = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedA.key, metadata: signedA.metadata } });
+    const modelsB = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedB.key, metadata: signedB.metadata } });
+
+    const aId = Object.keys(modelsA).find((k) => k.endsWith("/default/gpt-4o"));
+    const bId = Object.keys(modelsB).find((k) => k.endsWith("/default/gpt-4o"));
+    assert.equal(aId, bId, "one row for one site's model, whichever account lists it");
+
+    // A different site label is a different id, so the same model name from
+    // two sites stays two rows.
+    const c = await startNewAPI();
+    try {
+      const signedC = await signIn({ baseURL: c.base, accessToken: ACCESS_TOKEN, siteLabel: "43API" }, { directory: tmpdir() });
+      const modelsC = await instance.provider.models({ models: {} }, { auth: { type: "api", key: signedC.key, metadata: signedC.metadata } });
+      const cId = Object.keys(modelsC).find((k) => k.endsWith("/default/gpt-4o"));
+      assert.notEqual(cId, aId);
+      assert.match(cId, /^43API\/default\/gpt-4o$/);
+    } finally {
+      await c.close();
+    }
+  } finally {
+    await a.close();
+    await b.close();
   }
 });
 

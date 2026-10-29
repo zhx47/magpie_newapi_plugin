@@ -27,32 +27,40 @@ export function baseForProtocol(base, proto) {
   return proto === "gemini" ? `${base}/v1beta` : `${base}/v1`;
 }
 
-/** The model id Magpie shows for a group's model. */
-export function catalogId(label, group, model, proto, suffix) {
-  return `${label}/${group}/${model}${suffix}`;
+/**
+ * The model's id: the site, the group and the model.
+ *
+ * `<siteLabel>/<group>/<model>`, and Magpie shows it as `newapi/<that>`.
+ *
+ * Two accounts of one site with the same label share these ids on purpose:
+ * same site, same group, same model, so a second copy in the picker would be
+ * a duplicate with nothing to tell it apart. Magpie merges accounts' lists by
+ * id, so one row stands for both, and both stay request candidates (the
+ * gateway pools a provider's accounts; a first one that fails is passed over).
+ * A different site has a different label, and its same-named model is its own
+ * id.
+ */
+export function catalogId(md, group, model, proto, suffix) {
+  return `${md.siteLabel}/${group}/${model}${suffix}`;
 }
 
 /**
- * The name Magpie shows: account, model, group, ratio and protocol.
+ * The name Magpie shows: the model, the site, the group, the ratio and the
+ * protocol.
  *
- * The account comes first because one `newapi` provider holds every site:
- * with several signed in, a row of `gpt-4o · default` says nothing about
- * which site or which user it would spend. The group is the second thing
- * that changes a model's price, so it stays.
+ * `gpt-4o · 42API · vip · ×0.8`. The site label is the first id segment and
+ * names the row, so a model served by two sites reads as two rows with
+ * different sites, and a model served by two accounts of one site reads as
+ * one row.
  */
-export function displayName(account, model, group, ratio, proto) {
-  const bits = [];
-  if (account) bits.push(account);
-  bits.push(model, group);
+export function displayName(siteLabel, model, group, ratio, proto) {
+  const bits = [model];
+  if (siteLabel) bits.push(siteLabel);
+  if (group) bits.push(group);
   if (ratio && Number(ratio) > 0) bits.push(`×${ratio}`);
   const label = labelOf(proto);
   if (label) bits.push(label);
   return bits.join(" · ");
-}
-
-/** The account label a model's name leads with: the user, else the site. */
-export function accountLabel(md) {
-  return String(md?.username || md?.displayName || "").trim() || String(md?.siteLabel || "").trim();
 }
 
 /**
@@ -60,13 +68,13 @@ export function accountLabel(md) {
  * `baseModel`, when the provider already had this id, gives the limits and
  * capabilities Magpie or models.dev knew.
  */
-export function modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel, account }) {
+export function modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel }) {
   const apiId = wireId(group, model);
   const npm = NPM[proto] ?? NPM.chat;
   const url = baseForProtocol(md.baseURL, proto);
   const entry = {
-    id: id ?? `${md.siteLabel}/${group}/${model}`,
-    name: displayName(account, model, group, ratio, proto),
+    id: id ?? catalogId(md, group, model, proto, ""),
+    name: displayName(md.siteLabel, model, group, ratio, proto),
     api: { id: apiId, url, npm },
     limit: baseModel?.limit ?? { context: 0, output: 0 },
     capabilities: baseModel?.capabilities ?? {
@@ -205,7 +213,6 @@ export function buildModels({ md, groups, pricing, options = {} }) {
     if (info && Number(info.ratio) > 0) ratioByGroup[name] = Number(info.ratio);
   }
 
-  const account = accountLabel(md);
   for (const [group, models] of Object.entries(groups)) {
     if (!Array.isArray(models) || !models.length) continue;
     perGroup[group] = models.length;
@@ -222,9 +229,9 @@ export function buildModels({ md, groups, pricing, options = {} }) {
         // The first protocol keeps the bare id, so turning the extra-protocol
         // switch on never invalidates a pick an agent already saved.
         const suffix = i === 0 ? "" : protocolSuffix(proto);
-        const id = catalogId(md.siteLabel, group, model, proto, suffix);
-        const baseModel = options.hostModels?.[`${md.siteLabel}/${group}/${model}`];
-        out[id] = modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel, account });
+        const id = catalogId(md, group, model, proto, suffix);
+        const baseModel = options.hostModels?.[catalogId(md, group, model, proto, "")];
+        out[id] = modelEntry({ catalogId: id, md, group, model, proto, ratio, baseModel });
       }
     }
   }

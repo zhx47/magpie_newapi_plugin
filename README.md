@@ -41,9 +41,9 @@ newapi/<siteLabel>/<group>/<model>
 ```
 
 - `example.com/default/gpt-4o` 和 `example.com/vip/gpt-4o` 是**两个模型**：同一个名字在不同分组里不冲突。
-- 模型名以**账号**开头，因为多个站点共用一个 `newapi` 供应商：
-  `alice · gpt-5 · vip · ×0.8 · Responses`
-  依次是：账号（用户名，没有则站点名）、模型、分组、分组倍率、协议（chat 不显示）。
+- 模型名是 `model · siteLabel · group · ×倍率 · 协议`，例如：
+  `gpt-5 · 42API · vip · ×0.8 · Responses`
+  站点名来自 `siteLabel`，所以不同站点的同名模型能分清；同一个站点的两个账号共用一个模型 ID 是**有意的**——同站点、同分组、同模型，再列一行只是重复项。协议只在非 chat 时显示。
 - 默认每个模型只用一种协议，按模型类型选：
   - Claude 类 → Anthropic Messages（保留 thinking / cache_control）
   - GPT-5 / Codex / o 系 → OpenAI Responses
@@ -112,7 +112,7 @@ newapi/<siteLabel>/<group>/<model>
 ## 限制
 
 - **一个 provider**：所有站点都挂在 `newapi` 下，站点体现在账号和模型 ID 里。Magpie 的 `auth.provider` 是静态的，无法每个站点动态生成 Provider 卡片。
-- **同一站点的多个账号建议用不同的 `siteLabel`**。模型 ID 是 `<siteLabel>/<group>/<model>`；Magpie 把各账号的模型表按 ID 合并展示（`host.js` 的 `models[k] ??= m`），所以两个账号撞了 label 时，选择器里只出现一份。
+- **同一站点的多个账号共用模型 ID 是有意的**。模型 ID 是 `<siteLabel>/<group>/<model>`；Magpie 把各账号的模型表按 ID 合并展示（`host.js` 的 `models[k] ??= m`），两个账号撞 label 时选择器里只出现一份——同站、同组、同模型，多一行只是重复项。
   但**请求不会走错账号**：每个账号的 `accounts[].models` 仍各自记着这个 ID，路由时第二个账号照样是候选（第一个失败会 failover 过去），而且插件在 `fetch` 里把请求固定发往**当前账号自己的站点**（`ownURL`），不会用另一个账号的地址和分组。撞 label 的代价只是模型选择器里少一份重复项。
 - **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。

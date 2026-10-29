@@ -179,7 +179,7 @@ Octopus 的做法：
 | 站点（baseURL + access token + 可选 user id） | 插件账号（provider `newapi` 的一个 account） | 一个站点一个账号；余额/签到/模型发现都按账号。 |
 | 用户分组（`default`、`vip`、`svip`、`auto`） | 模型 ID 的命名空间 | `<siteLabel>/<group>/<model>`；不建独立账号。 |
 | 分组 key（`sk-...`） | 账号 metadata 里的 `groupKeys` | 不进 Magpie 的 key 池；由插件 fetch 按分组选。 |
-| 模型 + 支持的端点 | Magpie 模型条目 | 每个条目独立 `api.npm`/`api.url`/`api.id`；显示名以账号开头：`<user> · <model> · <group> · ×<ratio> · <proto>`。 |
+| 模型 + 支持的端点 | Magpie 模型条目 | 每个条目独立 `api.npm`/`api.url`/`api.id`；显示名 `<model> · <siteLabel> · <group> · ×<ratio> · <proto>`。 |
 | access token | 账号的 `key` + `metadata` | `key` 用于账号身份；fetch 不把它发到推理接口。 |
 | 余额/已用/请求数 | `auth.usage` 的窗口 | 用 `balance`（钱包）+ `display`（文本）。 |
 | 每日签到 | `auth.checkin` | 映射 NewAPI 的 `success`/message。 |
