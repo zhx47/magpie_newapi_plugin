@@ -641,22 +641,17 @@ test("letting the site create keys asks nothing by hand", async () => {
       groupFilter: "default,vip,svip",
       autoCreate: "yes",
     };
-    const made = await ask(head);
-    assert.equal(made.key, "createdKeys", "the answer carries what was created");
-    const created = JSON.parse(made.options[0].value);
-    assert.match(created.svip, /^sk-created-/, `svip was created: ${JSON.stringify(created)}`);
+    // 创建发生在提问里，且只发生一次；建好之后不再问任何分组。
+    const next = await ask(head);
+    assert.equal(next.key, "checkin", "建出来之后直接问签到");
+    assert.equal(site.state.created.filter((t) => t.group === "svip").length, 1);
 
-    // 拿着这个答案就不再问任何问题，账号用建出来的 key 登录。
-    const next = await ask({ ...head, [made.key]: made.options[0].value });
-    assert.equal(next.key, "checkin");
-
-    const signed = await signIn(
-      { ...head, [made.key]: made.options[0].value },
-      { directory },
-    );
+    const signed = await signIn(head, { directory });
     assert.equal(signed.type, "success");
     assert.match(key(signed.metadata, "svip"), /^sk-created-/);
     assert.deepEqual(pend(signed.metadata), []);
+    // authorize 没有再建一轮
+    assert.equal(site.state.created.filter((t) => t.group === "svip").length, 1);
   } finally {
     await site.close();
   }
@@ -783,6 +778,65 @@ test("a group that already has a token is reused, not duplicated", async () => {
     // 不能再建第二个。
     const added = site.state.created.filter((t) => t.group === "added");
     assert.equal(added.length, 0, `a token was made for a group that had one: ${JSON.stringify(added)}`);
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- 登录只建一次 key，metadata 不留问答痕迹 ----------------------------
+
+test("三个分组只创建一轮 key，authorize 不再建第二轮", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+
+    // 像 GUI 那样一问一答走完
+    let inputs = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "" };
+    for (let i = 0; i < 12; i++) {
+      const q = await ask(inputs);
+      if (!q) break;
+      inputs = { ...inputs, [q.key]: q.type === "select" ? q.options[0].value : "" };
+      // 再调一次 ask：真实的 GUI 每次答完都会再问，不能因此重复创建
+      await ask(inputs);
+    }
+    const afterAsk = site.state.created.length;
+    assert.equal(afterAsk, 3, `问完是三个：${site.state.created.map((t) => t.group)}`);
+
+    const signed = await instance.auth.methods[0].authorize(inputs);
+    assert.equal(signed.type, "success");
+    assert.equal(site.state.created.length, 3, `authorize 没有再建：${site.state.created.map((t) => t.group)}`);
+  } finally {
+    await site.close();
+  }
+});
+
+test("登录写回的 metadata 里没有令牌的副本，也没有问答用的键", async () => {
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const directory = tmpdir();
+    const instance = await NewAPI({ directory, client: { auth: { set: async () => {} } }, magpie: { options: () => ({}) } });
+    const ask = (inputs) => instance.auth.methods[0].ask(inputs);
+
+    let inputs = { baseURL: site.base, accessToken: ACCESS_TOKEN, userId: "", siteLabel: "" };
+    for (let i = 0; i < 12; i++) {
+      const q = await ask(inputs);
+      if (!q) break;
+      inputs = { ...inputs, [q.key]: q.type === "select" ? q.options[0].value : "" };
+    }
+    const signed = await instance.auth.methods[0].authorize(inputs);
+
+    // Magpie 的 save() 是 {...inputs, ...result.metadata}，所以这里照做
+    const saved = JSON.parse(JSON.stringify({ ...inputs, ...signed.metadata }));
+    assert.equal("accessToken" in saved, false, "令牌只在 auth.key 里，metadata 不再存一份");
+    assert.equal("pick" in saved, false);
+    assert.equal("autoCreate" in saved, false);
+    assert.equal("createdKeys" in saved, false);
+    assert.equal(Object.keys(saved).some((k) => k.startsWith("groupkey:")), false, "手填的 key 不再原样留在 metadata");
+    // 该留的还在
+    assert.ok(saved.groups?.default, "分组表在");
+    assert.equal(saved.baseURL, site.base);
   } finally {
     await site.close();
   }

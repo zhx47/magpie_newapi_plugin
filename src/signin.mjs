@@ -36,6 +36,7 @@ import {
 } from "./util.mjs";
 import { TtlCache, cacheKey, groupsOf, knownAccounts } from "./state.mjs";
 import { checkKey, createKey } from "./sync.mjs";
+import { createdIn, forgetLogin, loginKey, markAsked, wasAsked } from "./session.mjs";
 import { t } from "./i18n.mjs";
 
 const PROVIDER = "newapi";
@@ -172,7 +173,7 @@ export function keysSoFar(found, inputs, picked) {
   }
 
   // 后面的来源覆盖前面的：手填的 key 胜过站点给的。
-  for (const src of [fromPick, createdKeys(inputs), pasted, legacy]) {
+  for (const src of [fromPick, createdIn(loginKey(inputs, found.base)), pasted, legacy]) {
     for (const [group, key] of Object.entries(src)) {
       if (key) out[group] = key;
     }
@@ -229,7 +230,8 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   }
 
   const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
-  let pending = pendingGroupsOf(found, inputs, keysSoFar(found, inputs, picked));
+  const keys = keysSoFar(found, inputs, picked);
+  let pending = pendingGroupsOf(found, inputs, keys);
   const autoCreate = inputs?.autoCreate;
   const allGroups = Object.keys(found.groups ?? {}).length || Object.keys(found.byGroup ?? {}).length;
 
@@ -261,12 +263,14 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     };
   }
 
-  // 创建每个分组都要一个请求，所以只做一次：答案里带上结果，
-  // 下一次调用从 `createdKeys` 读它。
-  if (pending.length && autoCreate === "yes" && typeof inputs?.[CREATED] !== "string") {
-    const created = {};
-    const made = [];
-    for (const group of pending) {
+  // 每个分组只向站点要一次，要没要到都记在会话里（不写进 inputs）。
+  // 建好的 key 立刻算进「已有」，所以不再多问一个「要接着填吗」，
+  // 直接问仍然缺的那些。
+  const session = loginKey(inputs, found.base);
+  let left = pending;
+  if (pending.length && autoCreate === "yes") {
+    const todo = pending.filter((group) => !wasAsked(session, group));
+    for (const group of todo) {
       const key = await createKey({
         base: found.base,
         token: found.token,
@@ -276,28 +280,15 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
         tokens: found.tokens ?? [],
         fetchImpl,
       }).catch(() => undefined);
-      if (key) {
-        created[group] = key;
-        made.push(group);
-      }
+      markAsked(session, group, key);
     }
-    const failed = pending.filter((g) => !created[g]);
-    const said = made.length ? `Created a key for ${made.join(", ")}.` : "The site created no key.";
-    const left = failed.length
-      ? ` ${failed.join(", ")} still need${failed.length === 1 ? "s" : ""} one pasted by hand: the site would not give it up.`
-      : "";
-    return {
-      type: "select",
-      key: CREATED,
-      message: `${said}${left}`,
-      options: [{ label: left ? "Paste them" : "Continue", value: JSON.stringify(created) }],
-    };
+    left = pending.filter((g) => !keys[g] && !createdIn(session)[g]);
   }
 
   // 站点给不出来的，逐个分组问。回答存在 groupkey:<分组> 下，
   // 已经问过的分组不会再问。
-  if (autoCreate !== "yes" || pending.length) {
-    for (const group of pending) {
+  if (left.length) {
+    for (const group of left) {
       const at = inputKey(group);
       if (typeof inputs?.[at] === "string") continue;
 
@@ -376,9 +367,6 @@ export function inputKey(group) {
   return `groupkey:${group}`;
 }
 
-/** 「让站点创建 key」那一问，把建出来的东西存在这里的回答下。 */
-export const CREATED = "createdKeys";
-
 /** 表示「这个插件还没登录过的站点」的那个选择值。 */
 export const NEW_SITE = "__new__";
 
@@ -399,23 +387,6 @@ export function resolvePick(inputs, directory) {
     userId: inputs.userId ?? known.userId,
     siteLabel: inputs.siteLabel || known.siteLabel,
   };
-}
-
-/** 「让站点创建 key」那一步建出来的：分组 → key。 */
-export function createdKeys(inputs) {
-  const raw = inputs?.[CREATED];
-  if (typeof raw !== "string" || !raw) return {};
-  try {
-    const made = JSON.parse(raw);
-    const out = {};
-    for (const [group, value] of Object.entries(made ?? {})) {
-      const k = normalizeApiKey(Array.isArray(value) ? value[0] : value);
-      if (k && !isMaskedKey(k)) out[group] = k;
-    }
-    return out;
-  } catch {
-    return {};
-  }
 }
 
 /** 在逐个分组的问题里填的 key：分组 → key。 */
@@ -465,9 +436,14 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
   const siteGroups = filter.length ? [...known].filter((g) => filter.includes(g)) : [...known];
 
   // 没走问答就直接答 yes 的调用方（命令行、服务器）在这里创建。
-  if (inputs?.autoCreate === "yes" && !Object.keys(createdKeys(inputs)).length) {
-    for (const group of sortGroups(siteGroups.filter((g) => !keys[g]))) {
+  const session = loginKey(inputs, base);
+  if (inputs?.autoCreate === "yes") {
+    // 问答里已经要过的分组不再要第二次。没走过问答的调用方（命令行、
+    // 服务器）在这里补上；要没要到都记进会话，免得 authorize 再建一轮。
+    const todo = sortGroups(siteGroups.filter((g) => !keys[g] && !wasAsked(session, g)));
+    for (const group of todo) {
       const key = await createKey({ base, token, userId, label, group, tokens, fetchImpl }).catch(() => undefined);
+      markAsked(session, group, key);
       if (key) keys[group] = key;
     }
   }
@@ -498,12 +474,15 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     groupsMap[name] = entry;
   }
 
+  // 这次登录结束，会话记录没用了。
+  forgetLogin(loginKey(inputs, base));
+
   return {
     type: "success",
     key: token,
-    metadata: {
+    metadata: interviewKeysCleared({
       accountId,
-      email: accountId, // host.js's whoOf() reads this for account identity
+      email: accountId, // host.js's whoOf() 用它认账号
       baseURL: base,
       userId: self.id || Number(userId) || undefined,
       username: self.username || "",
@@ -527,9 +506,29 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
       },
       pricingVersion: pricing?.pricingVersion ?? "",
       updatedAt: new Date().toISOString(),
-    },
+    }, inputs),
   };
 }
+
+/**
+ * 把只用于问答的键从 metadata 里抹掉。
+ *
+ * Magpie 的 save() 是 `{...inputs, ...result.metadata}`：问答的答案会原样
+ * 留在账号 metadata 里，包括访问令牌（它已经在 auth.key 里了，不该再存一份）、
+ * 选中的账号、创建开关，以及每个 `groupkey:<分组>`。
+ * 置成 undefined 之后 JSON 序列化就不会写出来。
+ */
+function interviewKeysCleared(metadata, inputs) {
+  const out = { ...metadata };
+  for (const key of INTERVIEW_KEYS) out[key] = undefined;
+  for (const key of Object.keys(inputs ?? {})) {
+    if (key.startsWith("groupkey:")) out[key] = undefined;
+  }
+  return out;
+}
+
+/** 只用于问答、不该留在账号里的键。 */
+const INTERVIEW_KEYS = ["accessToken", "pick", "autoCreate", "groupKeys"];
 
 
 function describe(e) {

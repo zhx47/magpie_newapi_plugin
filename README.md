@@ -27,7 +27,7 @@ magpie plugin login newapi
 | 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
 | 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
 | 5 | Group filter | 只在站点有 **7 个以上分组**时才问；更少就不打扰。 |
-| 6 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**。 |
+| 6 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**；建好之后不再多问一次「要继续吗」，直接问仍然缺的那些。 |
 | 7 | **每个仍然缺 key 的分组一个输入框** | 只有站点建不出来（或第 6 步选了 No）才会问。标题直接写 `API key for group "vip"`，一次填一个；留空跳过。已经能从站点读到、或刚创建的 key 不会再问。 |
 | 8 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
 
@@ -180,6 +180,18 @@ newapi/<siteLabel>/<group>/<model>
 - **手动回填的 key** 存账号 metadata，同时写一份 `newapi-keys.json` 缓存；缓存丢了需要重新贴。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。
+
+## 账号里存什么
+
+登录写回的账号 metadata 只有账号状态，没有多余的副本：
+
+| 存 | 不存 |
+| --- | --- |
+| `baseURL`、`siteLabel`、`userId`、`username` | access token（只在 Magpie 的 `auth.key` 里） |
+| `groups`（一张表：倍率、key、问题、是否试过） | `groupKeys`、`pendingGroups`、`keyProblems`、`createdKeys` |
+| `checkin`、`checkinBlocked`、`status` | 问答用的 `pick`、`autoCreate`、`groupkey:<分组>` |
+
+Magpie 的 `save()` 会把登录问答的答案整体合进 metadata（`host.js`：`{...inputs, ...result.metadata}`），所以插件在返回结果里把只用于问答的键显式置空，它们就不会被写进账号。
 
 ## 语言
 
