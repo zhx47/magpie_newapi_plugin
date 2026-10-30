@@ -1,12 +1,27 @@
-// 一个账号用了多少、还剩多少，也就是 Magpie 用量卡片显示的内容：
-// 钱包余额、已用额度与请求数、Magpie 知道的分组，以及签到是否关闭或被拦。
+// 一个账号还剩多少、花了多少，也就是 Magpie 用量卡片显示的内容。
 //
-// 钱包窗口（有 `balance`、没有 `used`）让 Magpie 把账号当成预付的，
-// 按剩余多少排序。纯文本窗口（只有 `display`、**不带** `used`）只读不计数，
-// 所以不会影响路由。
+// 卡片上只有一个额度窗口。New API 的余额（quota）和已用（used_quota）本来就是
+// 同一个钱包的两端，分成两行就是把同一件事报两遍，也画不出有意义的进度条：
+//
+//   窗口 = { used: 已用百分比, amount: 已用, limit: 已用 + 剩余, unit: 货币 }
+//
+// 这是 Magpie 自己那套额度形状（host.js 的 windows）：卡片显示
+// `已用 / 总额 单位 · 60.5% used`，配一条真进度条；点数字能在已用与剩余之间切换。
+//
+// 窗口带 `aside: true`，这是有意的。aside 把钱包挡在三样东西之外：
+//   - 整窗估算（internal/usage 的 holds）：钱包没有重置时钟，算不出来，
+//     否则卡片会多一行「整窗：数据不足」；
+//   - 额度走势（provider/quota_history.go 的 pointOf 跳过 aside）：
+//     钱包没有重置周期，画出来的是充值记录，不是额度走势；
+//   - 路由的额度比较（allowanceOf 跳过 aside）：Magpie 那套「用完就歇到下次
+//     重置」对钱包不成立，硬套只会让账号因为花掉的钱多而被排到后面。
+// 余额见底时请求会被站点拒绝，fallback 照常换下一个账号。
+//
+// 分组不单独占一行：分组写在模型名里（`model · 站点 · 分组`），倍率也在那里；
+// 只有真需要处理的分组（没 key、key 被拒）才提醒一句，那是一条提示不是额度。
 
 import { getStatus, getUserSelf } from "./api.mjs";
-import { caches, cacheKey, groupsMissing, groupsNeedingAttention, groupsOf, sortGroups } from "./state.mjs";
+import { caches, cacheKey, groupsMissing, groupsNeedingAttention, groupsOf } from "./state.mjs";
 
 import { formatQuota, quotaAsNumber, quotaInfo, quotaUnit } from "./util.mjs";
 import { t } from "./i18n.mjs";
@@ -56,46 +71,15 @@ export async function buildUsage(md, opts = {}) {
     usd_exchange_rate: status?.usdExchangeRate ?? md.status?.usdExchangeRate,
   });
 
-  const groupsMap = groupsOf(md);
-  const groupNames = sortGroups(Object.keys(groupsMap));
-  const groupList = groupNames.length ? groupNames.join(", ") : t("No groups yet · check in or open Usage to read them");
-  const ratio = groupNames
-    .filter((name) => Number(groupsMap[name].ratio) > 0)
-    .map((name) => `${name} ×${groupsMap[name].ratio}`)
-    .join(", ");
-
-  // 除了钱包，每一行都不带 `used`。Magpie 把带 `used` 的窗口当成额度的比例：
-  // 0 会画成 0% 进度条、一条趋势线，还有下面的「数据不足」
-  // （#2045 的 HoldsLow），而这些行并不是那个意思。
-  // 不带 `used` 时窗口就是纯文本，不参与任何计数。
-  const windows = [
-    {
-      // 钱包读数，也就是 Magpie #3950 要的形状：只有数字和单位，没有 `used`。
-      // 不加 `aside`：aside 窗口在组装账号额度时会被跳过，
-      // 而路由正是按这个余额来比较预付账号的。
-      name: t("Balance"),
-      balance: quotaAsNumber(self.quota, info),
-      unit: quotaUnit(info),
-      display: t("{left} left", { left: formatQuota(self.quota, info) }),
-    },
-    {
-      name: t("Used"),
-      display: t("{used} used · {n} requests", {
-        used: formatQuota(self.usedQuota, info),
-        n: Number(self.requestCount || 0).toLocaleString("en-US"),
-      }),
-    },
-    {
-      name: t("Groups"),
-      display: ratio ? `${groupList} (${ratio})` : groupList,
-    },
-  ];
+  const windows = [walletWindow(self, info)];
 
   // 从那一张分组表算出来：哪些没有 key，哪些被站点拒绝。
-  // 合成一行，因为两者都表示「重新登录来修」。
+  // 合成一行，因为两者都表示「重新登录来修」。这是一条提示，不是额度：
+  // 不带 `used` 就是纯文本行，Magpie 不会给它画进度条和走势线。
   const missing = groupsMissing(md);
   const problems = groupsNeedingAttention(md).filter((g) => !missing.includes(g));
   if (missing.length || problems.length) {
+    const groupsMap = groupsOf(md);
     const bits = [];
     if (missing.length) bits.push(t("no key: {groups}", { groups: missing.join(", ") }));
     if (problems.length) {
@@ -120,5 +104,35 @@ export async function buildUsage(md, opts = {}) {
     plan: self.group || "",
     user: self.username || "",
     windows,
+  };
+}
+
+/**
+ * 钱包那一条：剩余和已用合成一个窗口，一条进度条。
+ *
+ * `used` 是已用份额，`amount`/`limit`/`unit` 让它显示成
+ * 「已用 / 总额 单位 · 百分比」，点数字能在已用与剩余之间切换
+ * （app.js 的 quotaFill / quotaText / quotaCount）。
+ */
+export function walletWindow(self, info) {
+  const left = quotaAsNumber(self.quota, info);
+  const spent = quotaAsNumber(self.usedQuota, info);
+  const total = left + spent;
+  const name = t("Balance");
+
+  // 没充过也没花过：没有比例可画，只报读数。不带 used 就是纯文本行，
+  // Magpie 不会给它画进度条。总额不到一分钱时同理——两位小数会显示成 0。
+  if (!(total >= 0.01)) {
+    return { name, display: t("{left} left", { left: formatQuota(self.quota, info) }), aside: true };
+  }
+
+  const used = Math.round(Math.max(0, Math.min(100, (spent / total) * 100)) * 10) / 10;
+  return {
+    name,
+    used,
+    amount: spent,
+    limit: total,
+    unit: info.currency ? quotaUnit(info) : "quota",
+    aside: true,
   };
 }

@@ -238,15 +238,19 @@ test("the loader's fetch sends a request with the group's key", async () => {
   }
 });
 
-test("usage answers a wallet window and the site's plan", async () => {
+test("usage answers one wallet window and the site's plan", async () => {
   const { site, instance, getAuth } = await setup();
   try {
     const usage = await instance.auth.usage(getAuth);
     assert.equal(usage.plan, "default");
     assert.equal(usage.user, "alice");
-    const balance = usage.windows.find((w) => w.name === "Balance");
-    assert.equal(balance.balance, 10);
-    assert.equal(balance.display, "$10.00 left");
+    const wallet = usage.windows.find((w) => w.name === "Balance");
+    // 余额和已用是同一个钱包的两端：一行、一条进度条，不是两条读数。
+    assert.equal(wallet.used, 16.7, "1,000,000 spent of 6,000,000");
+    assert.equal(wallet.amount, 2);
+    assert.equal(wallet.limit, 12);
+    assert.equal(wallet.unit, "$");
+    assert.equal(wallet.aside, true, "不参与路由的额度比较");
     // 卡片里从不带 key。
     assert.ok(!JSON.stringify(usage).includes(VIP_KEY));
   } finally {
@@ -420,20 +424,22 @@ test("two accounts of one site share a model id on purpose", async () => {
   }
 });
 
-test("the usage rows that are text carry no share", async () => {
+test("the card is one wallet and nothing that would claim a share", async () => {
   const { site, instance, getAuth } = await setup();
   try {
     const usage = await instance.auth.usage(getAuth);
-    for (const name of ["Used", "Groups"]) {
-      const w = usage.windows.find((x) => x.name === name);
-      assert.ok(w, `${name} is there`);
-      assert.equal(w.used, undefined, `${name} must not claim a 0% share`);
-      assert.ok(w.display, `${name} says its text`);
+    // 只有钱包和（有缺 key 时）一条提示：没有单独的「已用」「分组」行，
+    // 它们本来就不是额度。
+    const named = usage.windows.map((w) => w.name);
+    assert.ok(!named.includes("Used"), `no Used row: ${named}`);
+    assert.ok(!named.includes("Groups"), `no Groups row: ${named}`);
+    assert.equal(named.filter((n) => n === "Balance").length, 1, "one wallet, not two");
+
+    // 提示行不带 used，否则 Magpie 会给它画 0% 进度条和走势线。
+    for (const w of usage.windows.filter((x) => x.name !== "Balance")) {
+      assert.equal(w.used, undefined, `${w.name} must not claim a share`);
+      assert.ok(w.display, `${w.name} says its text`);
     }
-    // 钱包是读数不是比例：只有 balance，没有 used。
-    const balance = usage.windows.find((x) => x.name === "Balance");
-    assert.equal(balance.used, undefined);
-    assert.equal(typeof balance.balance, "number");
   } finally {
     await site.close();
   }

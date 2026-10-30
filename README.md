@@ -129,9 +129,10 @@ newapi/<siteLabel>/<group>/<model>
 ## 余额与签到
 
 - 余额：`/api/user/self` 的 `quota`，按 `/api/status` 的 `quota_per_unit` 换算（默认 500000 quota = $1）。站点关闭货币显示时按原始 quota 显示。
-- 用量卡片只有**余额**是一条读数；「已用」「Groups」「Group keys」是纯文本行，不会画进度条，也不会显示 `0%`。
-  （Magpie 把带 `used` 的窗口当比例；这些行不发送 `used`，所以不会被误画成 0%。）
-- **Group keys** 一行列出两种需要处理的分组：`no key: svip`（完全没有 key）和 `refused: vip`（key 被站点拒绝）。两者都提示重新登录补上。
+- **卡片上只有一个额度窗口**：`已用 / 总额 单位 · 百分比`，配一条真进度条，点数字可在已用与剩余之间切换。New API 的 `used_quota` 和 `quota` 是同一个钱包的两端，所以合成一条；总额是两者之和。
+- 分组**不占额度行**：分组写在模型名里（`gpt-5 · acme · vip`），倍率也在那里。只有需要处理的分组才提醒一行 **Group keys**：`no key: svip`（完全没有 key）和 `refused: vip`（key 被站点拒绝）。
+- 那条提醒不带 `used`，所以 Magpie 不会给它画 0% 进度条，也不会进走势图。
+- 钱包窗口带 `aside`：它是一条读数，不参与 Magpie 的路由额度比较（钱包没有重置周期，硬套「用完就歇到下次重置」会让花得多的账号被无端排到后面）。余额花光时站点会拒绝请求，fallback 照常换账号。
 - 签到：`/api/user/self/checkin`，旧版本回退 `/api/user/checkin`。
 
 ### 签到开关与 Cloudflare

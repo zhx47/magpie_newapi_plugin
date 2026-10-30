@@ -40,20 +40,20 @@ test("Magpie 的 lang 值都折到插件支持的语言", () => {
 test("t() 按当前语言取文案，并填占位符", () => {
   setLocale("zh");
   assert.equal(locale(), "zh");
-  assert.equal(t("Balance"), "余额");
+  assert.equal(t("Access token"), "访问令牌");
   assert.equal(t("{left} left", { left: "¥3.20" }), "剩余 ¥3.20");
 
   setLocale("ja");
-  assert.equal(t("Balance"), "残高");
+  assert.equal(t("Access token"), "アクセストークン");
 
   setLocale("de");
-  assert.equal(t("Balance"), "Guthaben");
+  assert.equal(t("Access token"), "Zugriffstoken");
 
   setLocale("zh-TW");
-  assert.equal(t("Balance"), "餘額");
+  assert.equal(t("Access token"), "存取權杖");
 
   setLocale("en");
-  assert.equal(t("Balance"), "Balance");
+  assert.equal(t("Access token"), "Access token");
 });
 
 test("没有译文的句子原样返回，不返回 undefined", () => {

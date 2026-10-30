@@ -64,7 +64,7 @@
 | `loader(getAuth)` 每个账号运行一次，返回 `{ baseURL?, apiKey?, headers?, fetch? }`；`fetch(input, init)` 收到完整 URL + 已构造好的 headers/body。 | 用自定义 fetch 实现按分组选 key、把 `api.id` 还原成上游 model。 |
 | `options()` 在 `loader` 没给 `apiKey` 时自动用账号的 `key`。 | 账号 `key` 是 access token，不能让它被默认发到推理接口；fetch 必须删掉默认认证头，或用占位 `apiKey`。 |
 | `fetchAs` 的 header 顺序：SDK key 头 → loader headers → 网关头 → `chat.headers`。 | 自定义 fetch 最终覆盖认证头即可。 |
-| `auth.usage` 按账号运行，窗口支持 `balance`（预付钱包）、`display`（纯文本）、`amount/limit/unit`。 | 余额用 `balance` 窗口；缺 key、已用额度用 `display` 文本窗口。 |
+| `auth.usage` 按账号运行，窗口支持 `balance`（预付钱包）、`display`（纯文本）、`used/amount/limit/unit`、`aside`。 | 余额和已用合成一个 `used/amount/limit` 窗口（带 `aside`）；缺 key 用 `display` 文本窗口。 |
 | `auth.checkin` 每个北京日每账号一次，返回 `{ outcome, credit?, streak?, message?, until? }`；`outcome` ∈ claimed/done/ineligible/inactive/captcha/failed。 | 直接映射 NewAPI 签到结果。 |
 | `auth.options` 只支持 **布尔开关**（`key/label/description/default/confirm`）。 | 协议偏好、自动建 key、暴露多协议都做成布尔开关。 |
 | 登录 method 的 `prompts` 支持 `text`、`password`、`select`，支持 `when`/`validate`。 | access token 用 `password`；分组 key 回填用 `text`。 |
@@ -485,37 +485,32 @@ used    = used_quota / quota_per_unit
 
 如果 `display_in_currency=false`，直接显示 quota 数字，单位用 `quota`（或站点自定义“积分”）。
 
-#### 3.7.2 usage 窗口
+#### 3.7.2 usage 窗口（已按实测重做）
+
+**早期设计**（`Balance` / `Used` / `Groups` / `Missing keys` 四行）已在 2026-10 改掉：余额和已用是同一个钱包的两端，拆成两行是同一件事报两遍，而且两条都画不出有意义的进度条；`Groups` 根本不是额度，占一个额度行只会多一条假进度线。
+
+现在只有一个额度窗口：
 
 ```js
 windows = [
   {
     name: "Balance",
-    balance: 12.34,
-    unit: "$",
-    display: "$12.34 left",
+    used: 39.5,          // 已用份额，Magpie 据此画进度条
+    amount: 1446,        // 已用
+    limit: 3657,         // 已用 + 剩余
+    unit: "¥",
+    aside: true,         // 读数，不参与路由的额度比较
   },
-  {
-    // 不带 used：带 used 的窗口会被 Magpie 当成比例，0 会画成 0% 进度条
-    name: "Used",
-    display: "$2.00 used · 1,234 requests",
-  },
-  {
-    name: "Groups",
-    display: "default ×1, vip ×0.8, svip ×0.6",
-  },
-  // 仅在有关键缺失时出现
-  {
-    name: "Missing keys",
-    display: "svip — sign in again to add them",
-  },
+  // 仅在有关键缺失时出现（纯文本，不带 used）
+  { name: "Group keys", display: "no key: svip — sign in again to fix" },
 ];
 ```
 
-- `balance` 窗口让 Magpie 把账号当作预付钱包，路由时按余额排序（同单位）。
-- `display` 文本窗口用于“已用/请求数/分组/缺 key”。
+- 总额 = `quota + used_quota`；站点按货币显示时按 `quota_per_unit` 和汇率换算，否则用原始 quota、`unit="quota"`。
+- `aside: true` 不是可有可无的。它让这个窗口**不进**额度走势（`quota_history.go` 的 `pointOf`）、**不算**整窗估算（没有重置时钟，否则卡片多一行「整窗：数据不足」）、**不参与**路由的额度比较（`allowanceOf` 跳过 aside）。钱包没有重置周期，Magpie 那套「用完就歇到下次重置」对它不成立。
+- 余额花光时由站点拒绝请求，fallback 照常换下一个账号，不需要 Magpie 预先排掉它。
+- 总额不到 0.01（没充过/没花过）时退回一行纯文本读数，不画 0% 进度条。
 - `plan` 用 `data.group`；`user` 用 `data.username`。
-- 如果 `display_in_currency=false`，`balance` 用 raw quota，`unit="quota"`，`display="12,345,678 quota left"`。
 - 缓存 30–60 秒，避免 Usage 页/托盘频繁请求。
 - access token 401/403：返回 `{ error: "...", signIn: "kept" }`，不要因为余额查询失败就把整个站点账号标记失效（分组 key 仍可用于推理）。如果模型列表也拿不到，再考虑标记。
 
@@ -1083,30 +1078,13 @@ async function readUsage(getAuth) {
   const unit = currency ? (md.status?.currencySymbol || "$") : "quota";
   const fmt = (q) => (currency ? `${unit}${(q / qpu).toFixed(2)}` : `${Math.round(q).toLocaleString()} quota`);
 
-  const windows = [
-    {
-      name: "Balance",
-      balance: currency ? self.quota / qpu : self.quota,
-      unit,
-      display: `${fmt(self.quota)} left`,
-    },
-    {
-      name: "Used",
-      used: 0,
-      display: `${fmt(self.used_quota)} used · ${Number(self.request_count || 0).toLocaleString()} requests`,
-    },
-    {
-      name: "Groups",
-      used: 0,
-      display: Object.keys(md.groups ?? {}).join(", "),
-    },
-  ];
+  // 余额和已用是同一个钱包的两端，合成一条（见 3.7.2）
+  const windows = [walletWindow(self, info)];
 
   if (groupsMissing(md).length) {
     windows.push({
-      name: "Missing keys",
-      used: 0,
-      display: `${md.pendingGroups.join(", ")} — sign in again with group keys`,
+      name: "Group keys",
+      display: `${groupsMissing(md).join(", ")} — sign in again with group keys`,
     });
   }
 
@@ -1535,6 +1513,6 @@ m accounts checkin
 
 1. `provider test` 对你常用的每种协议各跑一次（chat / responses / messages / gemini）。
 2. `magpie quota` 的余额与站点网页一致（注意 `display_in_currency`、`quota_display_type`、`usd_exchange_rate`）。
-3. 把某个分组的 key 删掉后重新登录，`Missing keys` 与回填流程符合预期。
+3. 把某个分组的 key 删掉后重新登录，`Group keys` 一行的提示与回填流程符合预期。
 4. 在开启 Turnstile 的站点上，`magpie accounts checkin` 显示 captcha，且不会发出注定失败的 POST。
 5. 只有 `/api/user/checkin` 的老布局站点（如 `v1.0.0-rc.46`）签到显示 `done`/`claimed`，而不是 404。

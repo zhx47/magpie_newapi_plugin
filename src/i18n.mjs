@@ -167,18 +167,6 @@ const STRINGS = {
     ja: "残高",
     de: "Guthaben",
   },
-  "Used": {
-    zh: "已用",
-    "zh-TW": "已用",
-    ja: "使用済み",
-    de: "Verbraucht",
-  },
-  "Groups": {
-    zh: "分组",
-    "zh-TW": "分組",
-    ja: "グループ",
-    de: "Gruppen",
-  },
   "Group keys": {
     zh: "分组 key",
     "zh-TW": "分組 key",
@@ -196,12 +184,6 @@ const STRINGS = {
     "zh-TW": "剩餘 {left}",
     ja: "残り {left}",
     de: "{left} übrig",
-  },
-  "{used} used · {n} requests": {
-    zh: "已用 {used} · {n} 次请求",
-    "zh-TW": "已用 {used} · {n} 次請求",
-    ja: "{used} 使用 · {n} リクエスト",
-    de: "{used} verbraucht · {n} Anfragen",
   },
   "no key: {groups}": {
     zh: "没有 key：{groups}",
@@ -226,12 +208,6 @@ const STRINGS = {
     "zh-TW": "—— 重新登入以修復",
     ja: "— サインインし直して修正",
     de: "– erneut anmelden, um es zu beheben",
-  },
-  "No groups yet · check in or open Usage to read them": {
-    zh: "还没有分组 · 签到或打开用量即可读取",
-    "zh-TW": "還沒有分組 · 簽到或開啟用量即可讀取",
-    ja: "グループはまだありません · チェックインか使用量を開くと読み取ります",
-    de: "Noch keine Gruppen · Check-in oder Nutzung öffnen, um sie zu lesen",
   },
 
   // ---- 签到 ----

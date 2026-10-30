@@ -342,21 +342,20 @@ test("a refused key is not used at all", async () => {
   }
 });
 
-test("usage shows the balance as a wallet and spend as text", async () => {
+test("usage is one wallet: left and spent on one meter", async () => {
   const site = await startNewAPI({ quota: 5_000_000, usedQuota: 1_000_000 });
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const usage = await buildUsage(md);
-    const balance = usage.windows.find((w) => w.name === "Balance");
-    assert.equal(balance.balance, 10); // 5,000,000 / 500,000
-    assert.equal(balance.unit, "$");
-    assert.equal(balance.display, "$10.00 left");
-    const used = usage.windows.find((w) => w.name === "Used");
-    // 不带 `used`：比例 0 会让 Magpie 给一行纯文本画 0% 进度条和趋势线。
-    assert.equal(used.used, undefined);
-    assert.match(used.display, /1,234 requests/);
-    const groups = usage.windows.find((w) => w.name === "Groups");
-    assert.match(groups.display, /vip/);
+    // 5,000,000 剩余 + 1,000,000 已用 = 6,000,000 总额，已用 1/6。
+    const wallet = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(wallet.used, 16.7);
+    assert.equal(wallet.amount, 2);
+    assert.equal(wallet.limit, 12);
+    assert.equal(wallet.unit, "$");
+    // 余额和已用不再是两行。
+    assert.equal(usage.windows.filter((w) => w.name === "Balance").length, 1);
+    assert.equal(usage.windows.some((w) => w.name === "Used" || w.name === "Groups"), false);
     const missing = usage.windows.find((w) => w.name === "Group keys");
     assert.match(missing.display, /no key: svip/);
     // 干净读取不提登录状态，这正好会清掉失效标记。
@@ -371,9 +370,9 @@ test("usage shows raw quota when the site displays tokens", async () => {
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const usage = await buildUsage(md);
-    const balance = usage.windows.find((w) => w.name === "Balance");
-    assert.equal(balance.balance, 5_000_000);
-    assert.equal(balance.unit, "quota");
+    const wallet = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(wallet.limit, 6_000_000);
+    assert.equal(wallet.unit, "quota");
   } finally {
     await site.close();
   }
@@ -575,10 +574,12 @@ test("the usage card of a CNY site reads in yuan", async () => {
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
     const usage = await buildUsage(md);
-    const balance = usage.windows.find((w) => w.name === "Balance");
-    assert.equal(balance.unit, "¥");
-    assert.equal(balance.display, "¥18.02 left");
-    assert.equal(balance.balance, 18.024678);
+    const wallet = usage.windows.find((w) => w.name === "Balance");
+    assert.equal(wallet.unit, "¥");
+    // 1,234,567 剩余 + 765,432 已用，按 500000/美元、7.3 汇率换算。
+    assert.ok(Math.abs(wallet.limit - 29.2) < 0.01, `limit ${wallet.limit}`);
+    assert.ok(Math.abs(wallet.amount - 11.18) < 0.01, `amount ${wallet.amount}`);
+    assert.equal(wallet.used, 38.3);
   } finally {
     await site.close();
   }
