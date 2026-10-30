@@ -261,3 +261,7 @@ npm run live
 ## 设计文档
 
 更完整的调研与决策见 [NEWAPI_PLUGIN_DESIGN.md](./NEWAPI_PLUGIN_DESIGN.md)。
+
+## 友情链接
+
+- [linux.do](https://linux.do) — 新的理想型技术社区
