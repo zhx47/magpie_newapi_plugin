@@ -145,6 +145,23 @@ newapi/<siteLabel>/<group>/<model>
 
 插件**不会**解验证码、不打开浏览器、不伪造 `cf_clearance`。
 
+### 签到前的工作量证明（PoW）
+
+`runanytime.hxi.me` 这类魔改站点在签到前加了一道计算题，流程是三步：
+
+1. `GET /api/user/pow/challenge?action=checkin` → `{challenge_id, prefix, difficulty, expires_at}`
+2. 找一个 8 位十六进制 `nonce`，使 `SHA-256(prefix + nonce)` 开头有 `difficulty` 个 0 比特
+3. `POST /api/user/checkin?pow_challenge=<id>&pow_nonce=<nonce>`
+
+这不是人机验证，能算，所以插件自己算（`src/pow.mjs`）。几个实现细节：
+
+- **只有名单里的主机才会去问题目**（`POW_HOSTS`）。普通 New API 没有这个接口，每次都问一遍是白花一个请求。
+- **题目是一次性的**：算题、等请求都可能让它过期。站点回「pow 不对」时，插件重新要一道题再试**一次**，不重放旧题，也不会无限重试。
+- `difficulty` 按**位**算，不按字节；不满一个字节的部分用位掩码判断。8 位十六进制是 32 位计数器的写法，站点也是把字符串拼上去再哈希的，所以这里必须哈希 ASCII 字符而不是整数。
+- 解不出来（难度过高或超出时间预算）时返回 `failed` 并说明原因，不会静默跳过。
+
+> 这段适配参考了我们自己魔改的 octopus（`internal/sitesync/runanytime.go`），连参考解都一样：`checkin:1792565712:6573:57c20d569dc58d08:` + `00004851` 满足难度 14，测试里拿它做回归。
+
 ## Provider 选项
 
 | 选项 | 默认 | 作用 |
@@ -229,7 +246,8 @@ npm run live
 - `src/protocols.mjs`：端点类型 → Magpie 协议。
 - `src/fetch.mjs`：按分组选 key、还原 model、认证头。
 - `src/usage.mjs`：余额与用量窗口。
-- `src/checkin.mjs`：签到、开关、CF/Turnstile 检测。
+- `src/checkin.mjs`：签到、开关、CF/Turnstile 检测、PoW 站点。
+- `src/pow.mjs`：工作量证明的求解（SHA-256 前导零位）。
 - `src/state.mjs`：分组表、缓存、按分组取 key。
 - `test/mock-newapi.mjs`：本地假站点，覆盖掩码 key、拒绝 reveal、Turnstile、CF 页面、签到旧路径等。
 

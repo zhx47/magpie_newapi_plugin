@@ -6,6 +6,7 @@
 // 所以这里从不只看状态码。
 
 import { USER_AGENT, fetchWithTimeout, joinURL } from "./util.mjs";
+import { parsePowChallenge } from "./pow.mjs";
 import { t } from "./i18n.mjs";
 
 // Magpie 给一个供应商的整个模型钩子只有 20 秒（gui/providers.go 的 Refetch）。
@@ -571,16 +572,43 @@ export async function getCheckinStatus(base, token, userId, opts = {}) {
 }
 
 /**
+ * 站点的 PoW 题目。站点没有这道门槛时返回 null——404/405 是正常的，
+ * 说明它就是个普通 New API。
+ */
+export async function getPowChallenge(base, token, userId, opts = {}) {
+  try {
+    const { payload } = await newapiFetch(base, "/api/user/pow/challenge", {
+      ...opts,
+      token,
+      userId,
+      query: { action: "checkin" },
+      timeout: opts.timeout ?? 8000,
+    });
+    return parsePowChallenge(payload);
+  } catch (e) {
+    if (e instanceof ChallengeError || isAuthError(e)) throw e;
+    if (e?.status === 404 || e?.status === 405) return null;
+    // 题目格式不对和「没有这道题」不是一回事，但对签到来说都是算不了：
+    // 交给调用方退回普通流程，站点自己会说要不要 PoW。
+    throw e;
+  }
+}
+
+/**
  * 按下签到。`path` 是读状态时找到的布局；没有就两种都试，新的在前。
  * 某个路径回 404/405 不算拒绝：站点用的是另一种布局。
+ *
+ * `pow` 是 `{ challengeId, nonce }`：加了 PoW 门槛的站点要这两个查询参数。
  */
 export async function postCheckin(base, token, userId, opts = {}) {
   const known = opts.path ?? checkinPathKnown.get(base);
   const paths = known ? [known, ...CHECKIN_PATHS.filter((p) => p !== known)] : CHECKIN_PATHS;
+  const pow = opts.pow ?? null;
+  const query = pow ? { pow_challenge: pow.challengeId, pow_nonce: pow.nonce } : undefined;
   let lastError;
   for (const path of paths) {
     try {
-      const { payload } = await newapiFetch(base, path, { ...opts, token, userId, method: "POST" });
+      const { payload } = await newapiFetch(base, path, { ...opts, token, userId, method: "POST", query });
       const r = checkinResult(payload);
       // 旧接口用 {data:{reward}} 回答，或者只给一句 message。
       if (!r.success && payload?.data?.reward !== undefined) {
@@ -592,6 +620,11 @@ export async function postCheckin(base, token, userId, opts = {}) {
       if (e instanceof ChallengeError) throw e;
       if (isAuthError(e)) throw e;
       const status = /** @type {ApiError} */ (e)?.status;
+      // 400/422 是站点在说「这次签到不行」（PoW 不对、参数缺了），
+      // 不是网络故障：如实回给调用方，别再试下一种布局。
+      if (status === 400 || status === 422) {
+        return { success: false, message: String(e?.message ?? "") };
+      }
       if (status !== 404 && status !== 405) throw e;
       lastError = e;
     }

@@ -691,3 +691,89 @@ test("a group the second account has no key for is not signed with another group
     await site.close();
   }
 });
+
+// ---- 魔改站点的 PoW 签到（runanytime 那类） -----------------------------
+
+const POW_PREFIX = "checkin:1792565712:6573:57c20d569dc58d08:";
+
+/** mock 站点在本机，所以把它当作名单里的主机。 */
+function powOpts(site) {
+  return { powHosts: [new URL(site.base).hostname] };
+}
+
+test("a PoW site solves the challenge and submits it", async () => {
+  const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 } });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "claimed", JSON.stringify(result));
+    assert.equal(result.credit, 0.01, "5000 awarded of 500000");
+    // 一张题、一个解，题目和解一起提交。
+    assert.equal(site.state.powChallenges.length, 1);
+    const post = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).at(-1);
+    assert.equal(new URL(`http://x${post.search}`).searchParams.get("pow_challenge"), "challenge-1");
+    assert.match(new URL(`http://x${post.search}`).searchParams.get("pow_nonce"), /^[0-9a-f]{8}$/);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a site that dropped its PoW signs in as before", async () => {
+  // mock 不开 pow，但站点在名单里：插件问一次题目，站点回 404，
+  // 于是照常签到，不会卡在「这道题算不出来」。
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "claimed", JSON.stringify(result));
+    assert.equal(site.state.requests.filter((r) => r.path === "/api/user/pow/challenge").length, 1, "问过一次");
+    assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, 1, "只按了一次");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a challenge the site turned down is asked for again, once", async () => {
+  // 题是一次性的：算题和等请求都可能让题过期。第一次被判无效时，
+  // 插件重新要一道题再试，而不是直接失败。
+  const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 }, powRejectFirst: 1 });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "claimed", JSON.stringify(result));
+    assert.equal(site.state.powChallenges.length, 2, "换了第二道题");
+    const posts = site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin"));
+    assert.equal(posts.length, 2);
+    // 第二次带的是新题，不是重放旧的那张。
+    assert.equal(new URL(`http://x${posts[1].search}`).searchParams.get("pow_challenge"), "challenge-2");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a challenge that keeps failing gives up after one retry", async () => {
+  const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 }, powRejectFirst: 5 });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "failed");
+    assert.match(String(result.message), /pow/i);
+    assert.equal(site.state.powChallenges.length, 2, "只重试一次，不会一直要题");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a host outside the list never asks for a challenge", async () => {
+  const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 } });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    // 不传 powHosts：站点不在名单里，按普通 New API 处理。
+    const result = await pressCheckin(md);
+    assert.equal(site.state.requests.some((r) => r.path === "/api/user/pow/challenge"), false);
+    assert.equal(result.outcome, "failed", "站点要求 PoW，没带就被拒");
+    assert.match(String(result.message), /pow/i);
+  } finally {
+    await site.close();
+  }
+});

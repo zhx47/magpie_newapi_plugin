@@ -6,9 +6,15 @@
 //   - 检测到质询就把账号标出来，之后的日子直接返回 `captcha`，
 //     不再白花请求；
 //   - 绝不破解或绕过任何质询。
+//
+// 另一些站点（runanytime 那类魔改）在签到前加一道工作量证明：先要一道题，
+// 算出一个 nonce，再带着题目一起提交。这不是质询，能算，所以插件算
+// （见 pow.mjs）；只有名单里的站点才会多问一次题目。
+//
 // Magpie 自己那个按账号的「每日签到」开关仍然决定这个钩子跑不跑。
 
-import { ChallengeError, getCheckinStatus, postCheckin, challengeKind } from "./api.mjs";
+import { ChallengeError, getCheckinStatus, getPowChallenge, postCheckin, challengeKind } from "./api.mjs";
+import { PowError, isPowSite, solvePow } from "./pow.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
@@ -16,6 +22,12 @@ import { t } from "./i18n.mjs";
 const CAPTCHA_KEY = {
   cf: "This site asks for a Cloudflare challenge. Check in on its website.",
   turnstile: "This site asks for a captcha. Check in on its website.",
+};
+
+/** PoW 求解失败时的文案，按原因分。 */
+const POW_MESSAGES = {
+  timeout: "The site's proof of work did not finish in time. Check in on its website.",
+  exhausted: "The site's proof of work could not be solved. Check in on its website.",
 };
 
 /** 站点关掉了自动签到时，钩子回答什么。 */
@@ -51,6 +63,45 @@ function partsOf(md) {
     token: String(md?.accessToken ?? md?.token ?? ""),
     userId: String(md?.userId ?? ""),
   };
+}
+
+/**
+ * 这个站点签到要不要先算题，要的话把 `{ challengeId, nonce }` 解出来。
+ *
+ * 只有名单里的站点才去问题目：普通 New API 没有这个接口，每次都问一遍
+ * 就是白花一个请求。取不到题目（站点去掉了门槛）就当没有。
+ */
+async function powFor(base, token, userId, opts, hosts) {
+  if (!isPowSite(base, hosts)) return null;
+  const challenge = await getPowChallenge(base, token, userId, opts);
+  // 站点把这道门槛去掉了：接口不在，就当没有，照常签到。
+  if (!challenge) return null;
+  return { challengeId: challenge.challengeId, nonce: solvePow(challenge) };
+}
+
+/**
+ * 按下签到：要算题就先算。
+ *
+ * 第一次提交可能因为题过期或被用过而失败——题是一次性的，而算题、等请求
+ * 都可能把时间花掉。被站点说 PoW 不对就重新要一道题再试一次，绝不重放旧题；
+ * 第二次还不行就如实报告，不会一直要题。
+ */
+async function pressWithPow(base, token, userId, path, opts) {
+  const hosts = opts?.powHosts;
+  const pow = await powFor(base, token, userId, opts, hosts);
+  const result = await withTransportRetry(() =>
+    postCheckin(base, token, userId, { ...opts, path, ...(pow ? { pow } : {}) }),
+  );
+  if (!pow || !powRefused(result)) return result;
+
+  const again = await powFor(base, token, userId, opts, hosts);
+  if (!again) return result;
+  return withTransportRetry(() => postCheckin(base, token, userId, { ...opts, path, pow: again }));
+}
+
+/** 站点把这次签到算成 PoW 不通过（题过期、已被用过、难度不对）。 */
+function powRefused(result) {
+  return !result.success && /pow/i.test(String(result.message ?? ""));
 }
 
 /** 只读签到状态，不按下去。 */
@@ -89,6 +140,9 @@ export async function pressCheckin(md, opts = {}) {
     usd_exchange_rate: md.status?.usdExchangeRate,
   });
 
+  // 名单里的魔改站点：签到前要先解一道 PoW。
+  const powSite = isPowSite(base, opts?.powHosts);
+
   let state;
   try {
     state = await checkinState(md, opts);
@@ -98,20 +152,25 @@ export async function pressCheckin(md, opts = {}) {
     }
     const kind = challengeKind(e);
     if (kind) return challengeResult(kind);
-    throw e;
+    // 有的 PoW 站点只留了 POST 的签到，读不到状态。它本来就不靠状态决定
+    // 签不签，所以照样按下去，让站点自己回答。
+    if (!powSite) throw e;
+    state = null;
   }
-  if (!state.enabled) {
-    return { outcome: "inactive", message: t("Check-in is not enabled on this site") };
-  }
-  if (state.checkedInToday) {
-    const credit = state.records?.[0]?.quota_awarded;
-    return {
-      outcome: "done",
-      credit: credit ? quotaAsNumber(credit, info) : 0,
-      message: credit
-        ? t("Already checked in today · +{credit}", { credit: formatQuota(credit, info) })
-        : t("Already checked in today"),
-    };
+  if (state) {
+    if (!state.enabled) {
+      return { outcome: "inactive", message: t("Check-in is not enabled on this site") };
+    }
+    if (state.checkedInToday) {
+      const credit = state.records?.[0]?.quota_awarded;
+      return {
+        outcome: "done",
+        credit: credit ? quotaAsNumber(credit, info) : 0,
+        message: credit
+          ? t("Already checked in today · +{credit}", { credit: formatQuota(credit, info) })
+          : t("Already checked in today"),
+      };
+    }
   }
   // 站点说它的签到需要 Turnstile 令牌：不带令牌按下去只会被拒，
   // 那就别花这个请求。只有 Cloudflare 拦截页会被记住：
@@ -122,8 +181,9 @@ export async function pressCheckin(md, opts = {}) {
 
   let result;
   try {
-    result = await withTransportRetry(() => postCheckin(base, token, userId, { ...opts, path: state.path }));
+    result = await pressWithPow(base, token, userId, state?.path, opts);
   } catch (e) {
+    if (e instanceof PowError) return { outcome: "failed", message: t(POW_MESSAGES[e.reason] ?? POW_MESSAGES.exhausted) };
     if (e instanceof ChallengeError) return challengeResult(e.code);
     const kind = challengeKind(e);
     if (kind) return challengeResult(kind);

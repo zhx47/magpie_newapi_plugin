@@ -211,6 +211,18 @@ const STRINGS = {
   },
 
   // ---- 签到 ----
+  "The site's proof of work did not finish in time. Check in on its website.": {
+    zh: "站点的计算题没能在限定时间内算完。请到它的网站签到。",
+    "zh-TW": "站點的計算題沒能在限定時間內算完。請到它的網站簽到。",
+    ja: "サイトの計算問題が制限時間内に解けませんでした。サイト上でチェックインしてください。",
+    de: "Die Rechenaufgabe der Seite war nicht rechtzeitig zu lösen. Bitte auf ihrer Website einchecken.",
+  },
+  "The site's proof of work could not be solved. Check in on its website.": {
+    zh: "站点的计算题算不出来。请到它的网站签到。",
+    "zh-TW": "站點的計算題算不出來。請到它的網站簽到。",
+    ja: "サイトの計算問題を解けませんでした。サイト上でチェックインしてください。",
+    de: "Die Rechenaufgabe der Seite war nicht zu lösen. Bitte auf ihrer Website einchecken.",
+  },
   "Auto check-in is off for this site. Check in on the site itself.": {
     zh: "这个站点关闭了自动签到。请到站点自己签到。",
     "zh-TW": "這個站點關閉了自動簽到。請到站點自己簽到。",

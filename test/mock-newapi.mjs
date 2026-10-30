@@ -3,6 +3,9 @@
 // 列表里的 key 是掩码、要求质询时返回质询页）。
 
 import http from "node:http";
+import { createHash } from "node:crypto";
+
+import { digestMatches } from "../src/pow.mjs";
 
 let mockSeq = 0;
 
@@ -137,8 +140,14 @@ export async function startNewAPI(options = {}) {
     // 有些版本（v1.0.0-rc.46）的 GET/POST 都只有 /api/user/checkin，
     // self 那条路由在它们那里是 404。
     legacyCheckinOnly: options.legacyCheckinOnly ?? false,
+    // runanytime 那类站点：签到前必须先解一道 PoW
+    pow: options.pow ?? null,
+    // 前 N 次提交回「题不对」，用来测重取一道题再试
+    powRejectFirst: options.powRejectFirst ?? 0,
+    powRejected: 0,
     usdExchangeRate: options.usdExchangeRate ?? 7.3,
     checkedIn: [],
+    powChallenges: [],
     created: [],
     requests: [],
     tokens: [
@@ -336,6 +345,24 @@ export async function startNewAPI(options = {}) {
       return;
     }
 
+    // ---- proof of work (runanytime and its like) ----
+    if (url.pathname === "/api/user/pow/challenge" && req.method === "GET") {
+      if (!state.pow) return json({ success: false, message: "not found" }, 404);
+      if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
+      if ((url.searchParams.get("action") ?? "") !== "checkin") {
+        return json({ success: false, message: "invalid action" }, 400);
+      }
+      const challenge = {
+        challenge_id: `challenge-${state.powChallenges.length + 1}`,
+        prefix: state.pow.prefix,
+        difficulty: state.pow.difficulty,
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      };
+      state.powChallenges.push(challenge);
+      json({ success: true, data: challenge });
+      return;
+    }
+
     // ---- check-in ----
     if (url.pathname === "/api/user/checkin" && req.method === "GET" && state.legacyCheckinOnly) {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
@@ -380,6 +407,14 @@ export async function startNewAPI(options = {}) {
     if (url.pathname === "/api/user/self/checkin" && req.method === "POST") {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
       if (state.legacyCheckinOnly) return json({ error: { message: "Invalid URL (POST /api/user/self/checkin)" } }, 404);
+      if (state.pow) {
+        if (state.powRejected < state.powRejectFirst) {
+          state.powRejected++;
+          return json({ success: false, message: "pow challenge expired" }, 400);
+        }
+        const pow = checkPow(state, url);
+        if (pow !== true) return json({ success: false, message: pow }, 400);
+      }
       if (state.challenge === "turnstile" || state.turnstileCheck) {
         json({ success: false, message: "Turnstile token is empty" });
         return;
@@ -401,12 +436,16 @@ export async function startNewAPI(options = {}) {
 
     if (url.pathname === "/api/user/checkin" && req.method === "POST") {
       // 老路径：只有老布局的站点用来真正签到；其他站点回 404，
-      // 除非测试要求旧版的那个 reward 形状。
-      if (!options.legacyCheckin && !state.legacyCheckinOnly) {
+      // 除非测试要求旧版的那个 reward 形状或这是 PoW 站点。
+      if (!options.legacyCheckin && !state.legacyCheckinOnly && !state.pow) {
         json({ success: false, message: "not found" }, 404);
         return;
       }
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
+      if (state.pow) {
+        const pow = checkPow(state, url);
+        if (pow !== true) return json({ success: false, message: pow }, 400);
+      }
       if (state.turnstileCheck || state.challenge === "turnstile") {
         json({ success: false, message: "Turnstile token is empty" });
         return;
@@ -437,6 +476,21 @@ export async function startNewAPI(options = {}) {
       Object.assign(state, update);
     },
   };
+}
+
+/**
+ * PoW 站点的签到门槛：必须带 pow_challenge / pow_nonce，且 nonce 真的满足难度。
+ * 返回 true 表示通过，否则是要回给站点的错误消息。
+ */
+function checkPow(state, url) {
+  const challengeId = url.searchParams.get("pow_challenge") ?? "";
+  const nonce = url.searchParams.get("pow_nonce") ?? "";
+  if (!challengeId || !nonce) return "pow challenge required";
+  const challenge = state.powChallenges.find((c) => c.challenge_id === challengeId);
+  if (!challenge) return "unknown pow challenge";
+  const digest = createHash("sha256").update(challenge.prefix + nonce).digest();
+  if (!digestMatches(digest, challenge.difficulty)) return "invalid pow";
+  return true;
 }
 
 function maskKey(key) {
