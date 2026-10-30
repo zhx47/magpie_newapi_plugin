@@ -1,6 +1,18 @@
 // 共用的小工具：URL 归一化、哈希、key 掩码、额度换算。
 // 这里不发网络请求，全是纯函数，方便测试。
 
+/**
+ * 所有请求用的 User-Agent。
+ *
+ * 有些 New API 站点按 UA 放行：只让 Codex CLI 过，别的都当机器人。
+ * 这里统一报 Codex CLI 的 UA（`codex_cli_rs/<version> (<os>; <arch>) <terminal>`），
+ * 管理接口（登录、分组、令牌、签到）和推理转发都用它——两者报不同的 UA
+ * 反而更显眼。
+ *
+ * 用户不必配置，也没有开关：站点认那个 UA，插件就得报那个。
+ */
+export const USER_AGENT = "codex_cli_rs/0.146.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal";
+
 /** 把 New API 站点地址归一化成「协议 + 主机（+ 可选子路径）」，去掉末尾斜杠。 */
 export function normalizeBase(input) {
   let s = String(input ?? "").trim();

@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import plugin, { NewAPI } from "../index.mjs";
 import { signIn } from "../src/signin.mjs";
+import { USER_AGENT } from "../src/util.mjs";
 import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
 
 function tmpdir() {
@@ -233,6 +234,31 @@ test("the loader's fetch sends a request with the group's key", async () => {
     assert.equal(missing.status, 503);
     assert.match((await missing.json()).error.message, /svip/);
     void DEFAULT_KEY;
+  } finally {
+    await site.close();
+  }
+});
+
+test("every request goes as Codex CLI, for sites that only let it in", async () => {
+  const { site, instance, auth } = await setup();
+  try {
+    // 一条管理接口的读取、一次分组列举、一次推理转发。
+    await instance.auth.usage(async () => auth);
+    await instance.provider.models({ models: {} }, { auth });
+    const loader = instance.auth.loader(async () => auth);
+    await loader.fetch(`${site.base}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: JSON.stringify(["default", "gpt-4o"]) }),
+    });
+
+    const seen = site.state.requests.filter((r) => r.headers["user-agent"] !== undefined);
+    assert.ok(seen.some((r) => r.path === "/api/user/self"), "the account read");
+    assert.ok(seen.some((r) => r.path === "/v1/models"), "a group's model list");
+    assert.ok(seen.some((r) => r.path === "/v1/chat/completions"), "a relayed request");
+    for (const r of seen) {
+      // 站点可能按 UA 放行：管理接口和推理报同一个，别一个像人一个像机器人。
+      assert.equal(r.headers["user-agent"], USER_AGENT, `${r.method} ${r.path}`);
+    }
   } finally {
     await site.close();
   }

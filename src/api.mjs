@@ -5,7 +5,7 @@
 // New API 大多数管理类失败都用 HTTP 200 + {success:false, message} 回答，
 // 所以这里从不只看状态码。
 
-import { fetchWithTimeout, joinURL } from "./util.mjs";
+import { USER_AGENT, fetchWithTimeout, joinURL } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
 // Magpie 给一个供应商的整个模型钩子只有 20 秒（gui/providers.go 的 Refetch）。
@@ -129,7 +129,7 @@ async function newapiFetchOnce(base, path, options = {}) {
     if (s) url += (url.includes("?") ? "&" : "?") + s;
   }
 
-  const headers = { accept: "application/json" };
+  const headers = { accept: "application/json", "user-agent": USER_AGENT };
   for (const [k, v] of Object.entries(extra ?? {})) headers[k] = String(v);
   if (body !== undefined) headers["content-type"] = "application/json";
   if (token) headers.authorization = `Bearer ${token}`;

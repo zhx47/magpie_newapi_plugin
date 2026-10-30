@@ -12,6 +12,7 @@
 import { ChallengeError, isAuthError } from "./api.mjs";
 import { authStyleOf, geminiModelSegment, parseWireId } from "./protocols.mjs";
 import { groupsOf, keysToTry } from "./state.mjs";
+import { USER_AGENT } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
 /** 读出请求指向的分组与模型；两者都没有时返回 null。 */
@@ -153,6 +154,8 @@ export function makeFetch(getAuth, { fetchImpl = globalThis.fetch } = {}) {
       headers.delete("x-goog-api-key");
       headers.delete("content-length");
       headers.delete("content-encoding");
+      // 有的站点只认 Codex CLI 的 UA，其他一律当机器人。
+      headers.set("user-agent", USER_AGENT);
       if (md.userId) headers.set("New-Api-User", String(md.userId));
       if (style === "anthropic") headers.set("x-api-key", key);
       else if (style === "gemini") headers.set("x-goog-api-key", key);

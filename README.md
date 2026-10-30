@@ -179,6 +179,7 @@ newapi/<siteLabel>/<group>/<model>
 - **一个分组一条 key**。站点的分组可以有好几条 token，插件取最新的那条；旧的那种“同组多 key 轮换”不再有，因为同一分组的多条 token 通常是同一权限的重复。手填的 key 也写在同一处。
 - **Gemini 端点**：Magpie 走 CodeAssist 信封（`/v1beta/models/<model>:streamGenerateContent`）。多数 New API 版本接受；如果某站点不兼容，把该模型的协议切到 chat（默认通常已经是 chat，除非该模型只有 Gemini 端点）。
 - **定价**：`/api/pricing` 只在部分站点公开；关闭时模型仍从每个分组的 `/v1/models` 得到，但协议只能保守地按 Chat 处理（或按模型名猜测 Claude / GPT-5）。
+- **User-Agent 固定**：所有请求都报 `codex_cli_rs/0.146.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal`。有些站点只放行 Codex CLI 的 UA，管理接口和推理转发必须报同一个，否则一个像用户、一个像机器人。这一项没有开关：站点认那个 UA，插件就得报那个。
 
 ## 账号里存什么
 
