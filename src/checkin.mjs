@@ -2,10 +2,13 @@
 //
 // 有些 New API 站点给签到接口加了 Cloudflare Turnstile 或托管质询。
 // 访问令牌过不去——那需要浏览器。所以插件：
-//   - 允许登录时给每个站点关掉自动签到（`checkin=off`）；
 //   - 检测到质询就把账号标出来，之后的日子直接返回 `captcha`，
 //     不再白花请求；
 //   - 绝不破解或绕过任何质询。
+//
+// 开不开签到由 Magpie 自己的开关决定（Settings → 额度 → 对应账号，
+// 以及 Plugins 里这个插件的每日签到）。插件不另设一个：两个开关
+// 各说各的只会互相矛盾。
 //
 // 另一些站点（runanytime 那类魔改）在签到前加一道工作量证明：先要一道题，
 // 算出一个 nonce，再带着题目一起提交。这不是质询，能算，所以插件算
@@ -29,14 +32,6 @@ const POW_MESSAGES = {
   timeout: "The site's proof of work did not finish in time. Check in on its website.",
   exhausted: "The site's proof of work could not be solved. Check in on its website.",
 };
-
-/** 站点关掉了自动签到时，钩子回答什么。 */
-export function offResult() {
-  return {
-    outcome: "inactive",
-    message: t("Auto check-in is off for this site. Check in on the site itself."),
-  };
-}
 
 /** 之前见过质询时，钩子回答什么。 */
 export function blockedResult(kind) {

@@ -103,24 +103,6 @@ const STRINGS = {
     ja: "別の key を入力、または空欄でこのグループを飛ばす",
     de: "Anderen Schlüssel einfügen oder leer lassen, um die Gruppe zu überspringen",
   },
-  "Daily check-in": {
-    zh: "每日签到",
-    "zh-TW": "每日簽到",
-    ja: "毎日のチェックイン",
-    de: "Täglicher Check-in",
-  },
-  "Off (check in on the site yourself)": {
-    zh: "关闭（自己在站点签到）",
-    "zh-TW": "關閉（自己在站點簽到）",
-    ja: "オフ（サイトで自分でチェックイン）",
-    de: "Aus (selbst auf der Seite einchecken)",
-  },
-  "Automatic": {
-    zh: "自动",
-    "zh-TW": "自動",
-    ja: "自動",
-    de: "Automatisch",
-  },
 
   // ---- 登录校验 ----
   "Enter an http(s) URL, e.g. https://newapi.example.com": {
@@ -173,12 +155,6 @@ const STRINGS = {
     ja: "グループの key",
     de: "Gruppenschlüssel",
   },
-  "Auto check-in off · check in on the site": {
-    zh: "自动签到已关闭 · 请到站点签到",
-    "zh-TW": "自動簽到已關閉 · 請到站點簽到",
-    ja: "自動チェックインはオフ · サイトでチェックインしてください",
-    de: "Auto-Check-in aus · bitte auf der Seite einchecken",
-  },
   "{left} left": {
     zh: "剩余 {left}",
     "zh-TW": "剩餘 {left}",
@@ -222,12 +198,6 @@ const STRINGS = {
     "zh-TW": "站點的計算題算不出來。請到它的網站簽到。",
     ja: "サイトの計算問題を解けませんでした。サイト上でチェックインしてください。",
     de: "Die Rechenaufgabe der Seite war nicht zu lösen. Bitte auf ihrer Website einchecken.",
-  },
-  "Auto check-in is off for this site. Check in on the site itself.": {
-    zh: "这个站点关闭了自动签到。请到站点自己签到。",
-    "zh-TW": "這個站點關閉了自動簽到。請到站點自己簽到。",
-    ja: "このサイトでは自動チェックインをオフにしています。サイトで直接チェックインしてください。",
-    de: "Auto-Check-in ist für diese Seite aus. Bitte direkt auf der Seite einchecken.",
   },
   "This site asks for a Cloudflare challenge. Check in on its website.": {
     zh: "这个站点有 Cloudflare 质询。请到它的网站签到。",

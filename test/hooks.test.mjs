@@ -143,13 +143,11 @@ test("the missing group is asked by name, and a refused key is asked again", asy
     assert.notEqual(q2.key, q1.key);
     assert.match(q2.message, /"svip"/);
 
-    // 三个都答完：接着问签到开关，那是最后一问。
+    // 三个都答完就结束：签到开关是 Magpie 的，插件不再问一次。
     const q3 = await ask({ ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY });
     assert.match(q3.message, /"vip"/);
     const answered = { ...head, [q1.key]: DEFAULT_KEY, [q2.key]: VIP_KEY, [q3.key]: VIP_KEY };
-    const done = await ask(answered);
-    assert.equal(done.key, "checkin");
-    assert.equal(await ask({ ...answered, checkin: "auto" }), null);
+    assert.equal(await ask(answered), null);
   } finally {
     await site.close();
   }
@@ -304,21 +302,6 @@ test("checkin is claimed on the first press and done on the next", async () => {
     assert.equal(first.credit, 0.01);
     const second = await instance.auth.checkin(getAuth);
     assert.equal(second.outcome, "done");
-  } finally {
-    await site.close();
-  }
-});
-
-test("checkin off never reaches the site", async () => {
-  const { site, instance } = await setup({ inputs: { checkin: "off" } });
-  try {
-    const result = await instance.auth.checkin(async () => ({
-      type: "api",
-      key: ACCESS_TOKEN,
-      metadata: { baseURL: site.base, checkin: "off", groups: {} },
-    }));
-    assert.equal(result.outcome, "inactive");
-    assert.equal(site.state.requests.filter((r) => r.path.includes("checkin")).length, 0);
   } finally {
     await site.close();
   }
@@ -674,9 +657,9 @@ test("letting the site create keys asks nothing by hand", async () => {
       siteLabel: "",
       autoCreate: "yes",
     };
-    // 创建发生在提问里，且只发生一次；建好之后不再问任何分组。
+    // 创建发生在提问里，且只发生一次；建好之后什么都不用再问。
     const next = await ask(head);
-    assert.equal(next.key, "checkin", "建出来之后直接问签到");
+    assert.equal(next, null, "建出来之后就没有问题了");
     assert.equal(site.state.created.filter((t) => t.group === "svip").length, 1);
 
     const signed = await signIn(head, { directory });
@@ -713,8 +696,8 @@ test("an account already on disk is offered first, and its token reused", async 
     const offered = pick.options.find((o) => o.value !== "__new__");
     assert.ok(offered, "the saved account is offered");
     assert.match(offered.label, /one-site/);
-    // 站点有三个分组；提示里写了数量和签到是否开启。
-    assert.match(offered.hint, /^3 · /);
+    // 站点有三个分组；提示里写了数量。
+    assert.equal(offered.hint, "3");
 
     // 选中它，令牌和标识都不用输入就填好了。
     const picked = await ask({ pick: offered.value });

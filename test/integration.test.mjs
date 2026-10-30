@@ -10,6 +10,7 @@ import { buildUsage } from "../src/usage.mjs";
 import { pressCheckin } from "../src/checkin.mjs";
 import { signIn, validateAccessToken } from "../src/signin.mjs";
 import { groupsOf, knownAccounts } from "../src/state.mjs";
+import { syncAccount } from "../src/sync.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "../src/util.mjs";
 import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
 
@@ -85,7 +86,8 @@ test("sign in reveals the keys it may and names the groups it may not", async ()
     assert.equal(key(md, "default"), DEFAULT_KEY);
     assert.equal(key(md, "vip"), VIP_KEY);
     assert.deepEqual(pend(md), ["svip"]);
-    assert.equal(md.checkin, "auto");
+    // 签到开关是 Magpie 的，账号里不再存这一项。
+    assert.equal("checkin" in md, false);
     assert.equal(md.status.quotaPerUnit, 500000);
     assert.equal(md.status.checkin, true);
 
@@ -106,7 +108,6 @@ test("sign in keeps a pasted key when reveal is denied", async () => {
         accessToken: ACCESS_TOKEN,
         "groupkey:default": "sk-pasted-default-1",
         "groupkey:vip": "sk-pasted-vip-2",
-        checkin: "off",
       },
       { directory },
     );
@@ -114,7 +115,6 @@ test("sign in keeps a pasted key when reveal is denied", async () => {
     assert.equal(key(md, "default"), "sk-pasted-default-1");
     assert.equal(key(md, "vip"), "sk-pasted-vip-2");
     assert.deepEqual(pend(md), ["svip"]);
-    assert.equal(md.checkin, "off");
   } finally {
     await site.close();
   }
@@ -404,21 +404,6 @@ test("check-in already done reads as done", async () => {
   }
 });
 
-test("check-in off is inactive and asks the site nothing", async () => {
-  const site = await startNewAPI();
-  try {
-    const { NewAPI } = await import("../index.mjs");
-    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN, checkin: "off" }, { directory: tmpdir() }));
-    const plugin = await NewAPI({ directory: tmpdir(), magpie: { options: () => ({}) } });
-    const result = await plugin.auth.checkin(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md }));
-    assert.equal(result.outcome, "inactive");
-    assert.match(result.message, /off/);
-    assert.equal(site.state.requests.filter((r) => r.path.includes("checkin")).length, 0);
-  } finally {
-    await site.close();
-  }
-});
-
 test("a Turnstile site is a captcha, and nothing is pressed", async () => {
   const site = await startNewAPI({ turnstileCheck: true });
   try {
@@ -488,7 +473,7 @@ test("a pasted key lands in the one groups map, and every group is listed", asyn
   }
 });
 
-test("the plugin hook answers check-in with the switch and the block", async () => {
+test("the plugin hook answers check-in with the site's own block", async () => {
   const site = await startNewAPI({ challenge: "cf" });
   try {
     const { NewAPI } = await import("../index.mjs");
@@ -500,9 +485,6 @@ test("the plugin hook answers check-in with the switch and the block", async () 
       client: { auth: { set: async ({ body }) => void saved.push(body) } },
     });
     const getAuth = async () => ({ type: "api", key: ACCESS_TOKEN, metadata: md });
-
-    const off = await plugin.auth.checkin(async () => ({ type: "api", key: ACCESS_TOKEN, metadata: { ...md, checkin: "off" } }));
-    assert.equal(off.outcome, "inactive");
 
     const blocked = await plugin.auth.checkin(getAuth);
     assert.equal(blocked.outcome, "captcha");
@@ -773,6 +755,112 @@ test("a host outside the list never asks for a challenge", async () => {
     assert.equal(site.state.requests.some((r) => r.path === "/api/user/pow/challenge"), false);
     assert.equal(result.outcome, "failed", "站点要求 PoW，没带就被拒");
     assert.match(String(result.message), /pow/i);
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- 掩码 key 的自动回填 ------------------------------------------------
+
+test("a masked list is revealed, GET or POST, whichever the site takes", async () => {
+  // 列表是掩码、batch 接口没有，只有 GET 的 /:id/key 能拿到明文。
+  const site = await startNewAPI({ reveal: "allow", revealMethod: "GET" });
+  try {
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(signed).metadata;
+    assert.equal(key(md, "default"), DEFAULT_KEY, "GET reveal 拿到的 key");
+    assert.equal(key(md, "vip"), VIP_KEY);
+    assert.deepEqual(pend(md), ["svip"]);
+    // 只对掩码的 key 请求，明文的不白问
+    assert.ok(site.state.requests.some((r) => r.method === "GET" && /\/api\/token\/\d+\/key$/.test(r.path)));
+  } finally {
+    await site.close();
+  }
+});
+
+test("a POST-only site is revealed too", async () => {
+  const site = await startNewAPI({ reveal: "allow", revealMethod: "POST" });
+  try {
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(signed).metadata;
+    assert.equal(key(md, "default"), DEFAULT_KEY);
+    assert.equal(key(md, "vip"), VIP_KEY);
+  } finally {
+    await site.close();
+  }
+});
+
+test("a site that reveals with neither method leaves the groups to the user", async () => {
+  const site = await startNewAPI({ revealMethod: "none" });
+  try {
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(signed).metadata;
+    assert.deepEqual(pend(md), ["default", "svip", "vip"], "三个分组都需要手填");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a list that is already plaintext is taken as it is", async () => {
+  const site = await startNewAPI({ maskKeys: true, revealMethod: "none" });
+  try {
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(signed).metadata;
+    // 站点连 reveal 接口都没有，但列表里就是明文：不需要再问。
+    assert.equal(key(md, "default"), DEFAULT_KEY);
+    assert.equal(key(md, "vip"), VIP_KEY);
+    assert.equal(site.state.requests.some((r) => /\/api\/token\/\d+\/key$/.test(r.path)), false);
+  } finally {
+    await site.close();
+  }
+});
+
+/** 拒绝读分组的 fetch：模拟把 /groups 藏在权限后面的站点。 */
+function refuseGroups(fetchImpl) {
+  return async (url, init) => {
+    if (String(url).includes("/groups")) {
+      return new Response(JSON.stringify({ success: false, message: "forbidden" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return fetchImpl(url, init);
+  };
+}
+
+test("a site that refuses its groups endpoint keeps the account's own table", async () => {
+  // 站点拒绝 /groups（很多站点把它藏在权限后面）：分组表不能因此被清空，
+  // 手填的 key 更不能丢——用户的正是这条路。
+  const site = await startNewAPI({ reveal: "deny" });
+  try {
+    const md = runtimeOf(
+      await signIn(
+        { baseURL: site.base, accessToken: ACCESS_TOKEN, "groupkey:default": "sk-my-own", "groupkey:vip": "sk-my-vip" },
+        { directory: tmpdir() },
+      ),
+    );
+    const out = await syncAccount(md, { fetchImpl: refuseGroups(globalThis.fetch), force: true });
+    assert.deepEqual(Object.keys(out.groups).sort(), ["default", "svip", "vip"], "分组一个都没少");
+    assert.equal(out.groups.default.key, "sk-my-own", "手填的 key 还在");
+    assert.equal(out.groups.vip.key, "sk-my-vip");
+  } finally {
+    await site.close();
+  }
+});
+
+test("a sync that cannot reach the site changes nothing", async () => {
+  const site = await startNewAPI();
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const before = JSON.stringify(md.groups);
+    const out = await syncAccount(md, {
+      fetchImpl: async () => {
+        throw Object.assign(new Error("offline"), { status: 0 });
+      },
+      force: true,
+    });
+    assert.equal(JSON.stringify(out.groups), before, "连不上就什么都不动");
+    assert.equal(out.changed, false);
   } finally {
     await site.close();
   }

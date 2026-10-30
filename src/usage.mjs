@@ -94,10 +94,6 @@ export async function buildUsage(md, opts = {}) {
     });
   }
 
-  if (md.checkin === "off") {
-    windows.push({ name: t("Daily check-in"), display: t("Auto check-in off · check in on the site") });
-  }
-
   // 不带 signIn：一次干净读取会清掉失效标记，正常工作的令牌本该如此。
   // 只有令牌被拒时，钩子才补上 "kept"。
   return {

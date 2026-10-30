@@ -25,7 +25,7 @@ import {
   tokenUsable,
 } from "./api.mjs";
 import { caches, cacheKey, groupsOf, sortGroups } from "./state.mjs";
-import { cleanLabel, normalizeApiKey } from "./util.mjs";
+import { cleanLabel, isMaskedKey, normalizeApiKey } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
 /** 一次读取信任它上次看到的结果多久。 */
@@ -93,8 +93,17 @@ export async function keysFromTokens({ base, token, userId, groups, tokens, fetc
   }
   if (!newest.size) return found;
 
+  // 列表里已经是明文的分组不用再问：只有掩码或空着的才值得 reveal。
+  const need = [];
+  for (const [group, tk] of newest) {
+    const listed = String(tk.key ?? "").trim();
+    if (listed && !isMaskedKey(listed)) found[group] = listed;
+    else need.push(tk.id);
+  }
+  if (!need.length) return found;
+
   try {
-    const revealed = await revealTokenKeys(base, token, userId, [...newest.values()].map((t) => t.id), { fetchImpl });
+    const revealed = await revealTokenKeys(base, token, userId, need, { fetchImpl });
     for (const [group, tk] of newest) {
       const key = revealed.get(tk.id);
       if (key) found[group] = key;
@@ -180,28 +189,32 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     notes.push(`读不到站点的分组：${String(e?.message ?? e).slice(0, 100)}`);
   }
 
+  // 站点给了分组表就以它为准；读不到就**从账号现有的表出发**。
+  // 从空表出发会把整张表（包括手填的 key）一起清掉——很多站点把
+  // /api/user/self/groups 藏在权限后面，那个接口一 403，账号就空了。
   const next = {};
-  for (const [name, info] of Object.entries(siteGroups ?? {})) {
-    const old = before[name] ?? {};
-    const entry = {};
-    const ratio = Number(info?.ratio);
-    if (ratio > 0) entry.ratio = ratio;
-    if (typeof info?.desc === "string" && info.desc) entry.desc = info.desc;
-    if (old.key) entry.key = old.key;
-    // 问题是针对「站点手里的那个 key」的，不是针对分组：
-    // 只要还持有当初被判定的那个 key，就保留这个判定。
-    if (old.problem && old.problem !== "gone" && old.key) entry.problem = old.problem;
-    if (!entry.key && old.tried) entry.tried = true;
-    next[name] = entry;
-  }
-
-  // 站点不再提供的分组：key 留着（分组可能回来），标成 gone，
-  // 这样没有地方会列出或使用它。
   if (siteGroups) {
+    for (const [name, info] of Object.entries(siteGroups)) {
+      const old = before[name] ?? {};
+      const entry = {};
+      const ratio = Number(info?.ratio);
+      if (ratio > 0) entry.ratio = ratio;
+      if (typeof info?.desc === "string" && info.desc) entry.desc = info.desc;
+      if (old.key) entry.key = old.key;
+      // 问题是针对「站点手里的那个 key」的，不是针对分组：
+      // 只要还持有当初被判定的那个 key，就保留这个判定。
+      if (old.problem && old.problem !== "gone" && old.key) entry.problem = old.problem;
+      if (!entry.key && old.tried) entry.tried = true;
+      next[name] = entry;
+    }
+    // 站点不再提供的分组：key 留着（分组可能回来），标成 gone，
+    // 这样没有地方会列出或使用它。
     for (const [name, old] of Object.entries(before)) {
       if (name in next) continue;
       next[name] = { ...old, problem: "gone" };
     }
+  } else {
+    for (const [name, old] of Object.entries(before)) next[name] = { ...old };
   }
 
   const siteNames = siteGroups ? Object.keys(siteGroups) : Object.keys(before);
@@ -209,7 +222,8 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
   // 没有 key 的分组：先看站点已有的 token，允许创建时再建新的。
   let needKeys = sortGroups(siteNames.filter((g) => !next[g]?.key && !next[g]?.tried));
   if (needKeys.length) {
-    const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }))) ?? [];
+    // 读不到就把这次要 key 的尝试留到下一次：这不是「分组没有 key」。
+    const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }).catch(() => []))) ?? [];
     const found = await keysFromTokens({ base, token, userId, groups: needKeys, tokens, fetchImpl });
     for (const [group, key] of Object.entries(found)) {
       next[group] = { ...next[group], key };

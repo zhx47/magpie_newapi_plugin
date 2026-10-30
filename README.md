@@ -21,14 +21,13 @@ magpie plugin login newapi
 
 | 顺序 | 字段 | 说明 |
 | --- | --- | --- |
-| 0 | **哪个账号** | 已经登录过时，第一个问题就是**账号选择器**：列出已保存的站点（`acme (alice) — newapi.example.com`，带分组数和签到状态）外加「Another site」。**选已有的账号不需要再填 access token**——Magpie 已经存着，插件直接读取复用。 |
+| 0 | **哪个账号** | 已经登录过时，第一个问题就是**账号选择器**：列出已保存的站点（`acme (alice) — newapi.example.com`，带分组数）外加「Another site」。**选已有的账号不需要再填 access token**——Magpie 已经存着，插件直接读取复用。 |
 | 1 | Base URL | 只有选「Another site」才问。`https://newapi.example.com`；`/v1`、`/api`、末尾 `/` 会被归一化掉。 |
 | 2 | Access token | 站点「个人设置 → 访问令牌」里的 token。**不是** `sk-...` 推理 key；填了 `sk-` 会被提示改写。**这是唯一一次要求填 token**。 |
 | 3 | User id | 只有老版本 New API / AnyRouter 需要；新版本直接回车留空。 |
 | 4 | Site label | 模型 ID 的前缀，默认是站点 host。同一站点多个账号时用 `example@alice`。 |
 | 5 | **让站点创建 key** | 有分组缺 key 时先问：`2 groups without a key (default, svip). Let the site create one for each?`。选 Yes 就由站点建 token 并自动取回，**不用手填**；建好之后不再多问一次「要继续吗」，直接问仍然缺的那些。 |
 | 6 | **每个仍然缺 key 的分组一个输入框** | 只有站点建不出来（或第 5 步选了 No）才会问。标题直接写 `API key for group "vip"`，一次填一个；留空跳过。已经能从站点读到、或刚创建的 key 不会再问。 |
-| 7 | Daily check-in | `Automatic` / `Off`。有 Cloudflare 质询、只能手动签到的站点选 `Off`。 |
 
 没有「只同步部分分组」的过滤器：站点的分组都进账号，因为分组本身就决定模型 ID（`<站点>/<分组>/<模型>`），漏一个就少一批模型。想少看几个，在 Magpie 的模型选择器里筛。
 
@@ -137,11 +136,14 @@ newapi/<siteLabel>/<group>/<model>
 
 ### 签到开关与 Cloudflare
 
-有些站点给签到接口加了 **Cloudflare Turnstile 或托管质询**。access token 过不去，必须浏览器。插件有三层控制：
+**开不开签到由 Magpie 决定，插件不另设开关。** Magpie 有两处：Plugins 里这个插件的「每日签到」，以及 Settings → 额度 → 对应账号。两处都关掉时 `auth.checkin` 根本不会被调用。
 
-1. **登录时选 `Off`**：`auth.checkin` 直接返回 `inactive`，不发任何请求。
-2. **自动检测**：遇到 `cf-mitigated: challenge`、`Server: cloudflare` + 403、`Just a moment...` 页面、或 `Turnstile token is empty` 时，返回 `captcha` 并把 `checkinBlocked` 写回账号，之后直接短路，不再浪费请求。重新登录选 `Automatic` 会清除标记。
-3. **Magpie 自己的开关**：Settings → Usage → Plugins → Daily check-in，关掉后根本不会调用插件。
+之前插件自己在登录时还问过一句「Automatic / Off」，那是多余的：它和 Magpie 的开关各说各的，关掉 Magpie 那边不会影响插件这边，反过来也一样。现在只剩 Magpie 的开关，登录不再问这一句，账号里也不再存 `checkin` 字段。
+
+有些站点给签到接口加了 **Cloudflare Turnstile 或托管质询**。access token 过不去，必须浏览器。插件对这类站点的处理是：
+
+- 遇到 `cf-mitigated: challenge`、`Server: cloudflare` + 403、`Just a moment...` 页面、或 `Turnstile token is empty` 时，返回 `captcha` 并把 `checkinBlocked` 写回账号，之后直接短路，不再浪费请求。
+- `checkinBlocked` 只是「这个站点拦过签到」这一事实，不是开关：重新登录（或站点自己放开）会清掉它。
 
 插件**不会**解验证码、不打开浏览器、不伪造 `cf_clearance`。
 
@@ -206,7 +208,7 @@ newapi/<siteLabel>/<group>/<model>
 | --- | --- |
 | `baseURL`、`siteLabel`、`userId`、`username` | access token（只在 Magpie 的 `auth.key` 里） |
 | `groups`（一张表：倍率、key、问题、是否试过） | `groupKeys`、`pendingGroups`、`keyProblems`、`createdKeys` |
-| `checkin`、`checkinBlocked`、`status` | 问答用的 `pick`、`autoCreate`、`groupFilter`、`groupkey:<分组>` |
+| `checkinBlocked`（站点拦过签到这个事实）、`status` | 签到开关（那是 Magpie 的）、问答用的 `pick`、`autoCreate`、`groupkey:<分组>` |
 
 Magpie 的 `save()` 会把登录问答的答案整体合进 metadata（`host.js`：`{...inputs, ...result.metadata}`），所以插件在返回结果里把只用于问答的键显式置空，它们就不会被写进账号。
 
@@ -246,7 +248,7 @@ npm run live
 - `src/protocols.mjs`：端点类型 → Magpie 协议。
 - `src/fetch.mjs`：按分组选 key、还原 model、认证头。
 - `src/usage.mjs`：余额与用量窗口。
-- `src/checkin.mjs`：签到、开关、CF/Turnstile 检测、PoW 站点。
+- `src/checkin.mjs`：签到、CF/Turnstile 检测、PoW 站点。
 - `src/pow.mjs`：工作量证明的求解（SHA-256 前导零位）。
 - `src/state.mjs`：分组表、缓存、按分组取 key。
 - `test/mock-newapi.mjs`：本地假站点，覆盖掩码 key、拒绝 reveal、Turnstile、CF 页面、签到旧路径等。

@@ -5,7 +5,7 @@
 // New API 大多数管理类失败都用 HTTP 200 + {success:false, message} 回答，
 // 所以这里从不只看状态码。
 
-import { USER_AGENT, fetchWithTimeout, joinURL } from "./util.mjs";
+import { USER_AGENT, fetchWithTimeout, isMaskedKey, joinURL } from "./util.mjs";
 import { parsePowChallenge } from "./pow.mjs";
 import { t } from "./i18n.mjs";
 
@@ -410,48 +410,70 @@ export function tokenUsable(t, now = Date.now() / 1000) {
 
 /**
  * 按 id 取 token 的完整 key，能取到多少算多少。
- * 先试批量接口，剩下的逐个取。任何失败都不致命：
- * 调用方保留已拿到的，剩下的问用户。
+ *
+ * 顺序是：批量接口 → 逐个 POST → 逐个 GET。同一个 `/api/token/:id/key`
+ * 在不同版本上收不同的方法（有的只认 POST，有的只认 GET），所以两种都试。
+ * 任何失败都不致命：调用方保留已拿到的，剩下的问用户。
  */
 export async function revealTokenKeys(base, token, userId, ids, opts = {}) {
   const keys = new Map();
   const pending = [...new Set(ids.filter((id) => Number(id) > 0))];
   if (!pending.length) return keys;
 
-  for (let i = 0; i < pending.length; i += 100) {
-    const chunk = pending.slice(i, i + 100);
-    try {
-      const { payload } = await newapiFetch(base, "/api/token/batch/keys", {
-        ...opts,
-        token,
-        userId,
-        method: "POST",
-        body: { ids: chunk },
-      });
-      const map = payload?.data?.keys ?? payload?.keys ?? {};
-      for (const [id, key] of Object.entries(map)) {
-        const k = String(key ?? "").trim();
-        if (k && !k.includes("*") && !k.includes("•")) keys.set(Number(id), k);
-      }
-    } catch (e) {
-      if (e instanceof ChallengeError || isAuthError(e)) {
-        // 完全没有 reveal 权限：逐个问也没意义。
-        return keys;
+  if (!opts.skipBatch) {
+    for (let i = 0; i < pending.length; i += 100) {
+      const chunk = pending.slice(i, i + 100);
+      try {
+        const { payload } = await newapiFetch(base, "/api/token/batch/keys", {
+          ...opts,
+          token,
+          userId,
+          method: "POST",
+          body: { ids: chunk },
+        });
+        const map = payload?.data?.keys ?? payload?.keys ?? {};
+        for (const [id, key] of Object.entries(map)) {
+          const k = String(key ?? "").trim();
+          if (k && !isMaskedKey(k)) keys.set(Number(id), k);
+        }
+      } catch (e) {
+        // 批量接口不可用（版本没有、或没权限）：逐个试还有机会，
+        // 所以这里什么都不做。
+        if (e instanceof ChallengeError) throw e;
       }
     }
   }
 
   for (const id of pending) {
     if (keys.has(id)) continue;
-    try {
-      const { payload } = await newapiFetch(base, `/api/token/${id}/key`, { ...opts, token, userId, method: "POST" });
-      const key = String(payload?.data?.key ?? payload?.key ?? "").trim();
-      if (key && !key.includes("*") && !key.includes("•")) keys.set(id, key);
-    } catch (e) {
-      if (e instanceof ChallengeError || isAuthError(e)) break;
-    }
+    const key = await revealOne(base, token, userId, id, opts);
+    if (key) keys.set(id, key);
   }
   return keys;
+}
+
+/**
+ * 一个 token 的完整 key：先 POST，再 GET。
+ *
+ * 返回 null 表示两条路都不通（没有权限、或者站点两个方法都不支持）。
+ * 掩码值不算 key：有的站点用 200 回一个掩码。
+ */
+export async function revealOne(base, token, userId, id, opts = {}) {
+  for (const method of ["POST", "GET"]) {
+    try {
+      const { payload } = await newapiFetch(base, `/api/token/${id}/key`, { ...opts, token, userId, method });
+      const key = String(payload?.data?.key ?? payload?.key ?? "").trim();
+      if (key && !isMaskedKey(key)) return key;
+    } catch (e) {
+      if (e instanceof ChallengeError) throw e;
+      // 401/403 是站点在说「不给你看」，换方法也一样；404/405 才是
+      // 「这个版本没有这个方法」，值得再试另一个。
+      if (isAuthError(e)) return null;
+      const status = /** @type {ApiError} */ (e)?.status;
+      if (status !== 404 && status !== 405) return null;
+    }
+  }
+  return null;
 }
 
 /**

@@ -145,6 +145,10 @@ export async function startNewAPI(options = {}) {
     // 前 N 次提交回「题不对」，用来测重取一道题再试
     powRejectFirst: options.powRejectFirst ?? 0,
     powRejected: 0,
+    // 列表接口是否直接给明文 key（默认掩码）
+    maskKeys: options.maskKeys ?? false,
+    // reveal 接口只认哪个方法："" 两个都认，也可以是 "none"
+    revealMethod: options.revealMethod ?? "",
     usdExchangeRate: options.usdExchangeRate ?? 7.3,
     checkedIn: [],
     powChallenges: [],
@@ -263,13 +267,18 @@ export async function startNewAPI(options = {}) {
     // ---- tokens ----
     if (url.pathname === "/api/token/" && req.method === "GET") {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
-      const items = state.tokens.map((t) => ({ ...t, key: maskKey(t.key) }));
+      // maskKeys：列表里也是明文（老版本、或站点没开掩码）
+      const items = state.tokens.map((t) => ({ ...t, key: state.maskKeys ? t.key : maskKey(t.key) }));
       json({ success: true, data: { page: 1, page_size: 100, total: items.length, items } });
       return;
     }
 
     const batch = url.pathname.match(/^\/api\/token\/batch\/keys$/);
     if (batch && req.method === "POST") {
+      // 有的版本没有批量接口；只认 GET 的那些版本通常也没有（batch 是纯 POST）
+      if (state.revealMethod === "none" || state.revealMethod === "GET") {
+        return json({ success: false, message: "not found" }, 404);
+      }
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
       if (state.reveal === "deny") return json({ success: false, message: "无权进行此操作，没有权限" }, 403);
       const ids = JSON.parse(body || "{}").ids ?? [];
@@ -284,7 +293,13 @@ export async function startNewAPI(options = {}) {
     }
 
     const one = url.pathname.match(/^\/api\/token\/(\d+)\/key$/);
-    if (one && req.method === "POST") {
+    if (one) {
+      if (state.revealMethod === "none") return json({ success: false, message: "not found" }, 404);
+      // 有的版本只认 GET，有的只认 POST：另一个回 405，由插件换一个再试。
+      if (state.revealMethod && state.revealMethod !== req.method) {
+        return json({ success: false, message: "method not allowed" }, 405);
+      }
+      if (!["GET", "POST"].includes(req.method)) return json({ success: false, message: "method not allowed" }, 405);
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
       if (state.reveal === "deny") return json({ success: false, message: "无权进行此操作，没有权限" }, 403);
       const t = state.tokens.find((x) => x.id === Number(one[1]));

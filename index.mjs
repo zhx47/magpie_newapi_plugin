@@ -5,7 +5,7 @@
 // 模型 ID 里带站点和分组，于是同名模型出现在两个分组里就是 Magpie 的两个模型。
 
 import { ChallengeError, isAuthError } from "./src/api.mjs";
-import { blockedResult, offResult, pressCheckin } from "./src/checkin.mjs";
+import { blockedResult, pressCheckin } from "./src/checkin.mjs";
 import { makeFetch } from "./src/fetch.mjs";
 import { buildModels, discover } from "./src/models.mjs";
 import { PROVIDER, nextQuestion, signIn } from "./src/signin.mjs";
@@ -193,7 +193,9 @@ export const NewAPI = async (input) => {
         const current = fresh ?? auth;
         const cur = accountOf(current).md;
 
-        if (cur.checkin === "off") return offResult();
+        // 签到开不开由 Magpie 自己的开关决定（Settings → 额度 → 账号），
+        // 插件不另设一个：两个开关各说各的只会互相矛盾。这里只管
+        // 这个站点本身的状态：被 Cloudflare 拦过就直接说，不再发请求。
         if (cur.checkinBlocked) return blockedResult(cur.checkinBlocked);
 
         let result;

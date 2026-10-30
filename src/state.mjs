@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { hashKey, isMaskedKey, normalizeApiKey, sortGroups } from "./util.mjs";
+import { hashKey, isMaskedKey, normalizeApiKey, normalizeBase, sortGroups } from "./util.mjs";
 
 const TTL_MS = 60_000;
 const MAX_ENTRIES = 64;
@@ -226,4 +226,24 @@ export function knownAccounts(directory) {
     });
   }
   return out.sort((a, b) => a.accountId.localeCompare(b.accountId));
+}
+
+/**
+ * 已经存在的那个账号：同一个站点、同一个访问令牌。
+ *
+ * 用它把旧的分组表（尤其是手填的 key）带回来。用户没在账号选择器里
+ * 点它，而是又填了一遍站点地址和令牌，说的仍是同一个账号——之前那条
+ * 路径会把旧表整个丢掉，手填的 key 于是一次登录就没了。
+ *
+ * 站点地址和令牌都要对上：同一站点换了令牌，可能是另一个账号。
+ */
+export function savedAccount(directory, base, token) {
+  const site = normalizeBase(base);
+  const tok = String(token ?? "");
+  if (!site || !tok) return null;
+  const mine = knownAccounts(directory).filter((a) => normalizeBase(a.base) === site && a.accessToken === tok);
+  if (!mine.length) return null;
+  // 同一站点、同一令牌有多条（重复登录过）：取分组最多的那份，
+  // 它最可能是用户填过 key 的。
+  return mine.reduce((best, a) => (a.groups.length > best.groups.length ? a : best));
 }

@@ -31,7 +31,7 @@ import {
   normalizeBase,
   sortGroups,
 } from "./util.mjs";
-import { TtlCache, cacheKey, groupsOf, knownAccounts } from "./state.mjs";
+import { TtlCache, cacheKey, groupsOf, knownAccounts, savedAccount } from "./state.mjs";
 import { checkKey, createKey } from "./sync.mjs";
 import { createdIn, forgetLogin, loginKey, markAsked, wasAsked } from "./session.mjs";
 import { t } from "./i18n.mjs";
@@ -110,23 +110,44 @@ async function surveyOnce(inputs, fetchImpl) {
   ]);
 
   const byGroup = tokensByGroup(tokens, self.group);
+  // 列表里的 key 有时就是明文（老版本、或站点没开掩码），那就不用再 reveal。
+  // 掩码或空着才值得再问一次。
+  const wantReveal = [];
+  const plain = new Map();
+  for (const [group, list] of Object.entries(byGroup)) {
+    const newest = newestToken(list);
+    if (!newest) continue;
+    const listed = String(newest.key ?? "").trim();
+    if (listed && !isMaskedKey(listed)) plain.set(group, listed);
+    else wantReveal.push(newest.id);
+  }
   let revealed = new Map();
-  try {
-    const ids = Object.values(byGroup).flat().map((t) => t.id);
-    revealed = await revealTokenKeys(base, token, userId, ids, { fetchImpl });
-  } catch {
-    revealed = new Map();
+  if (wantReveal.length) {
+    try {
+      revealed = await revealTokenKeys(base, token, userId, wantReveal, { fetchImpl });
+    } catch {
+      revealed = new Map();
+    }
   }
 
-  // 每个分组最新的一条可用 token，能读到就带上它的 key。
+  // 每个分组最新的一条可用 token：明文的直接用，掩码的用 reveal 的结果。
   const fromTokens = {};
   for (const [group, list] of Object.entries(byGroup)) {
-    const newest = [...list].sort((a, b) => b.id - a.id)[0];
+    if (plain.has(group)) {
+      fromTokens[group] = plain.get(group);
+      continue;
+    }
+    const newest = newestToken(list);
     const key = newest ? revealed.get(newest.id) : "";
     if (key) fromTokens[group] = key;
   }
 
   return { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens };
+}
+
+/** 一个分组里最新的一条可用 token（id 大的）。 */
+function newestToken(list) {
+  return [...list].sort((a, b) => b.id - a.id)[0];
 }
 
 /** survey 的结果按它的输入缓存一分钟。 */
@@ -193,7 +214,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
           ...known.map((a) => ({
             label: `${a.accountId} — ${a.base.replace(/^https?:\/\//, "")}`,
             value: a.key,
-            hint: `${a.groups.length} · ${a.checkin === "off" ? t("Auto check-in off · check in on the site") : t("Daily check-in")}`,
+            hint: `${a.groups.length}`,
           })),
           { label: t("Another site (paste its access token)"), value: NEW_SITE },
         ],
@@ -289,7 +310,6 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
     }
   }
 
-  if (inputs?.checkin === undefined) return prompt("checkin");
   return null;
 }
 
@@ -319,15 +339,6 @@ const FIRST_PROMPTS = {
     key: "siteLabel",
     message: t("Site label (the model prefix; empty uses the host)"),
     placeholder: "example",
-  },
-  checkin: {
-    type: "select",
-    key: "checkin",
-    message: t("Daily check-in"),
-    options: [
-      { label: t("Automatic"), value: "auto" },
-      { label: t("Off (check in on the site yourself)"), value: "off" },
-    ],
   },
 };
 
@@ -374,7 +385,7 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
 
   const label = cleanLabel(inputs?.siteLabel, hostOf(base));
   const accountId = `${label} (${self.username || self.id || userId || "user"})`;
-  const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick);
+  const picked = knownAccounts(directory).find((a) => a.key === inputs?.pick) ?? savedAccount(directory, base, token);
 
   const keys = keysSoFar(found, inputs, picked);
 
@@ -441,7 +452,6 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
       displayName: self.displayName || "",
       siteLabel: label,
       groups: groupsMap,
-      checkin: inputs?.checkin !== "off" ? "auto" : "off",
       checkinBlocked: "",
       status: {
         quotaPerUnit: status?.quotaPerUnit ?? 500000,
