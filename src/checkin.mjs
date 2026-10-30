@@ -10,14 +10,15 @@
 // 以及 Plugins 里这个插件的每日签到）。插件不另设一个：两个开关
 // 各说各的只会互相矛盾。
 //
-// 另一些站点（runanytime 那类魔改）在签到前加一道工作量证明：先要一道题，
-// 算出一个 nonce，再带着题目一起提交。这不是质询，能算，所以插件算
-// （见 pow.mjs）；只有名单里的站点才会多问一次题目。
+// runanytime.hxi.me 是特例：它在签到前加了一道工作量证明，而且它的
+// 状态接口和 /api/status 都挂着 Turnstile。带访问令牌的签到本身是通的
+// （解完题就成），所以那个站点不读状态、不看 Turnstile，直接取题、算题、
+// 提交（见 runanytime.mjs 与下面的 pressRunAnyTime）。
 //
 // Magpie 自己那个按账号的「每日签到」开关仍然决定这个钩子跑不跑。
 
 import { ChallengeError, getCheckinStatus, getPowChallenge, postCheckin, challengeKind } from "./api.mjs";
-import { PowError, isPowSite, solvePow } from "./pow.mjs";
+import { PowError, isRunAnyTimeSite, solveChallenge } from "./runanytime.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "./util.mjs";
 import { t } from "./i18n.mjs";
 
@@ -60,38 +61,26 @@ function partsOf(md) {
   };
 }
 
-/**
- * 这个站点签到要不要先算题，要的话把 `{ challengeId, nonce }` 解出来。
- *
- * 只有名单里的站点才去问题目：普通 New API 没有这个接口，每次都问一遍
- * 就是白花一个请求。取不到题目（站点去掉了门槛）就当没有。
- */
-async function powFor(base, token, userId, opts, hosts) {
-  if (!isPowSite(base, hosts)) return null;
-  const challenge = await getPowChallenge(base, token, userId, opts);
-  // 站点把这道门槛去掉了：接口不在，就当没有，照常签到。
-  if (!challenge) return null;
-  return { challengeId: challenge.challengeId, nonce: solvePow(challenge) };
+/** 账号 metadata 里的显示设置，用来把额度换算成用户看到的数字。 */
+function infoOf(md) {
+  return quotaInfo({
+    quota_per_unit: md.status?.quotaPerUnit,
+    display_in_currency: md.status?.currency,
+    quota_display_type: md.status?.quotaDisplayType,
+    custom_currency_symbol: md.status?.currencySymbol,
+    custom_currency_exchange_rate: md.status?.currencyRate,
+    usd_exchange_rate: md.status?.usdExchangeRate,
+  });
 }
 
 /**
- * 按下签到：要算题就先算。
- *
- * 第一次提交可能因为题过期或被用过而失败——题是一次性的，而算题、等请求
- * 都可能把时间花掉。被站点说 PoW 不对就重新要一道题再试一次，绝不重放旧题；
- * 第二次还不行就如实报告，不会一直要题。
+ * 站点的题目算出来的东西：`{ challengeId, nonce }`。
+ * 站点没有这道门槛（接口不在）就是 null。
  */
-async function pressWithPow(base, token, userId, path, opts) {
-  const hosts = opts?.powHosts;
-  const pow = await powFor(base, token, userId, opts, hosts);
-  const result = await withTransportRetry(() =>
-    postCheckin(base, token, userId, { ...opts, path, ...(pow ? { pow } : {}) }),
-  );
-  if (!pow || !powRefused(result)) return result;
-
-  const again = await powFor(base, token, userId, opts, hosts);
-  if (!again) return result;
-  return withTransportRetry(() => postCheckin(base, token, userId, { ...opts, path, pow: again }));
+async function powFor(base, token, userId, opts) {
+  const challenge = await getPowChallenge(base, token, userId, opts);
+  if (!challenge) return null;
+  return { challengeId: challenge.challengeId, nonce: solveChallenge(challenge) };
 }
 
 /** 站点把这次签到算成 PoW 不通过（题过期、已被用过、难度不对）。 */
@@ -126,17 +115,14 @@ export async function pressCheckin(md, opts = {}) {
   const { base, token, userId } = partsOf(md);
   if (!base || !token) return { outcome: "failed", message: t("not signed in") };
 
-  const info = quotaInfo({
-    quota_per_unit: md.status?.quotaPerUnit,
-    display_in_currency: md.status?.currency,
-    quota_display_type: md.status?.quotaDisplayType,
-    custom_currency_symbol: md.status?.currencySymbol,
-    custom_currency_exchange_rate: md.status?.currencyRate,
-    usd_exchange_rate: md.status?.usdExchangeRate,
-  });
+  const info = infoOf(md);
 
-  // 名单里的魔改站点：签到前要先解一道 PoW。
-  const powSite = isPowSite(base, opts?.powHosts);
+  // runanytime 那类站点：不读状态、不看 Turnstile。它的状态接口和
+  // /api/status 都挂着 Turnstile，读了只会得到「去 App 里签到」，
+  // 而带访问令牌的 PoW 签到本身是通的。
+  if (isRunAnyTimeSite(base, opts?.specialHosts)) {
+    return pressRunAnyTime(base, token, userId, info, opts);
+  }
 
   let state;
   try {
@@ -147,10 +133,7 @@ export async function pressCheckin(md, opts = {}) {
     }
     const kind = challengeKind(e);
     if (kind) return challengeResult(kind);
-    // 有的 PoW 站点只留了 POST 的签到，读不到状态。它本来就不靠状态决定
-    // 签不签，所以照样按下去，让站点自己回答。
-    if (!powSite) throw e;
-    state = null;
+    throw e;
   }
   if (state) {
     if (!state.enabled) {
@@ -176,7 +159,41 @@ export async function pressCheckin(md, opts = {}) {
 
   let result;
   try {
-    result = await pressWithPow(base, token, userId, state?.path, opts);
+    result = await withTransportRetry(() => postCheckin(base, token, userId, { ...opts, path: state?.path }));
+  } catch (e) {
+    if (e instanceof ChallengeError) return challengeResult(e.code);
+    const kind = challengeKind(e);
+    if (kind) return challengeResult(kind);
+    throw e;
+  }
+  return answerOf(result, info);
+}
+
+/**
+ * runanytime.hxi.me 的签到：取题 → 算题 → 提交，不读状态。
+ *
+ * 不读状态是有意的：这个站点的状态接口和 /api/status 都挂着 Turnstile，
+ * 读到的只会是「该去 App 里签到」，而带访问令牌的 PoW 签到本身是通的。
+ *
+ * 提交的路径交给通用的那条顺序（新的在前，404 再试旧的）：这个站点的
+ * 两种布局都见过。第一次提交可能因为题过期或被用过而失败——题是一次性
+ * 的，而算题、等请求都可能把时间花掉。被站点说 PoW 不对就重新要一道题
+ * 再试一次，绝不重放旧题；第二次还不行就如实报告，不会一直要题。
+ *
+ * 站点把这道门槛去掉了（题目接口 404）就照常提交，和别的站点一样。
+ */
+async function pressRunAnyTime(base, token, userId, info, opts) {
+  try {
+    const pow = await powFor(base, token, userId, opts);
+    // 路径交给通用顺序：这个站点的两种布局都见过。
+    let result = await withTransportRetry(() => postCheckin(base, token, userId, { ...opts, ...(pow ? { pow } : {}) }));
+    if (pow && powRefused(result)) {
+      const again = await powFor(base, token, userId, opts);
+      if (again) {
+        result = await withTransportRetry(() => postCheckin(base, token, userId, { ...opts, pow: again }));
+      }
+    }
+    return answerOf(result, info);
   } catch (e) {
     if (e instanceof PowError) return { outcome: "failed", message: t(POW_MESSAGES[e.reason] ?? POW_MESSAGES.exhausted) };
     if (e instanceof ChallengeError) return challengeResult(e.code);
@@ -184,7 +201,15 @@ export async function pressCheckin(md, opts = {}) {
     if (kind) return challengeResult(kind);
     throw e;
   }
+}
 
+/**
+ * 站点的签到回答 → Magpie 的 outcome。
+ *
+ * 成功就是 claimed/done；「今天已经签过」「签到没开」这两种是站点在
+ * 说状态，不是失败；Turnstile 拒绝如实报告，但不标记账号。
+ */
+function answerOf(result, info) {
   if (result.success) {
     const awarded = Number(result.data?.quota_awarded) || 0;
     return {
@@ -197,8 +222,6 @@ export async function pressCheckin(md, opts = {}) {
   const message = String(result.message ?? "").trim();
   if (/already checked in|今天已签到|已签到/i.test(message)) return { outcome: "done", message };
   if (/not enabled|disabled|未开启/i.test(message)) return { outcome: "inactive", message };
-  // Turnstile 拒绝是站点自己的开关，不是新发现：如实报告，
-  // 但不标记账号（理由见上面的状态检查）。
   if (/turnstile|captcha|verification failed|验证/i.test(message)) {
     return { outcome: "captcha", message: message || t(CAPTCHA_KEY.turnstile) };
   }

@@ -5,7 +5,7 @@
 import http from "node:http";
 import { createHash } from "node:crypto";
 
-import { digestMatches } from "../src/pow.mjs";
+import { digestMatches } from "../src/runanytime.mjs";
 
 let mockSeq = 0;
 
@@ -119,6 +119,9 @@ const GROUPS = {
  *   pricingClosed: bool                  （/api/pricing 回 403）
  *   checkinEnabled: bool
  *   turnstileCheck: bool                 （/api/status 说需要 Turnstile）
+ *   statusTurnstile: bool                （只有 /api/status 说需要，签到接口本身能过：
+ *                                         runanytime 就是这种——它挂着 Turnstile，
+ *                                         但带访问令牌的 PoW 签到是通的）
  *   quotaPerUnit, quota, usedQuota（额度单位、余额、已用额度）
  *   leanList: bool                       （列表只回 id/name/key/status，分组与额度在详情里）
  *   multiGroup: bool                     （一个 token 的 groups 是数组，可勾多个分组）
@@ -134,6 +137,8 @@ export async function startNewAPI(options = {}) {
     pricingClosed: options.pricingClosed ?? false,
     checkinEnabled: options.checkinEnabled ?? true,
     turnstileCheck: options.turnstileCheck ?? false,
+    // 只有 /api/status 说需要 Turnstile，签到接口本身能过（runanytime 那种）。
+    statusTurnstile: options.statusTurnstile ?? false,
     quotaPerUnit: options.quotaPerUnit ?? 500000,
     displayInCurrency: options.displayInCurrency ?? true,
     quotaDisplayType: options.quotaDisplayType ?? "USD",
@@ -213,7 +218,7 @@ export async function startNewAPI(options = {}) {
           usd_exchange_rate: state.usdExchangeRate,
           price: state.usdExchangeRate,
           checkin_enabled: state.checkinEnabled,
-          turnstile_check: state.turnstileCheck,
+          turnstile_check: state.turnstileCheck || state.statusTurnstile,
         },
       });
       return;

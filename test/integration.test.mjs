@@ -683,7 +683,7 @@ const POW_PREFIX = "checkin:1792565712:6573:57c20d569dc58d08:";
 
 /** mock 站点在本机，所以把它当作名单里的主机。 */
 function powOpts(site) {
-  return { powHosts: [new URL(site.base).hostname] };
+  return { specialHosts: [new URL(site.base).hostname] };
 }
 
 test("a PoW site solves the challenge and submits it", async () => {
@@ -753,7 +753,7 @@ test("a host outside the list never asks for a challenge", async () => {
   const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 } });
   try {
     const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
-    // 不传 powHosts：站点不在名单里，按普通 New API 处理。
+    // 不传 specialHosts：站点不在名单里，按普通 New API 处理。
     const result = await pressCheckin(md);
     assert.equal(site.state.requests.some((r) => r.path === "/api/user/pow/challenge"), false);
     assert.equal(result.outcome, "failed", "站点要求 PoW，没带就被拒");
@@ -872,7 +872,7 @@ test("a sync that cannot reach the site changes nothing", async () => {
 // ---- 按 host 特化的站点（hyxware.com） --------------------------------------
 //
 // 这些站点在 New API 上做了自己的改动，读法与通用路径不同。测试让本机
-// mock 冒充名单里的站点（specialHosts），与 pow.mjs 的做法一致。
+// mock 冒充名单里的站点（specialHosts），与 runanytime.mjs 的做法一致。
 
 /** 让 sync/signIn 把一个本机 mock 当成名单里的站点。 */
 function asSpecial(site) {
@@ -967,6 +967,45 @@ test("hyxware: a plain site alongside it is unaffected", async () => {
     const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
     const md = authOf(signed).metadata;
     assert.deepEqual(Object.keys(groupsOf(md)).sort(), ["default", "svip", "vip"], "没有 extra");
+  } finally {
+    await site.close();
+  }
+});
+
+test("runanytime signs in without reading its status or Turnstile", async () => {
+  // 这个站点的状态接口和 /api/status 都挂着 Turnstile：读状态只会得到
+  // 「去它的 App 里签到」，而带访问令牌的 PoW 签到本身是通的。
+  // 所以它不读状态、不看 Turnstile，直接取题 → 算题 → 提交。
+  const site = await startNewAPI({
+    pow: { prefix: POW_PREFIX, difficulty: 10 },
+    statusTurnstile: true,
+  });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    // 账号里记着「站点要 Turnstile」——普通站点这时会被直接拦下。
+    md.status = { ...(md.status ?? {}), turnstile: true };
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "claimed", JSON.stringify(result));
+    // 没读状态：没有那条 GET。
+    assert.equal(
+      site.state.requests.filter((r) => r.method === "GET" && r.path.includes("checkin")).length,
+      0,
+      "不读状态",
+    );
+    // 先要一道题，再带着解提交。
+    assert.equal(site.state.powChallenges.length, 1);
+    assert.equal(site.state.requests.filter((r) => r.method === "POST" && r.path.includes("checkin")).length, 1);
+  } finally {
+    await site.close();
+  }
+});
+
+test("runanytime still reports a check-in the site already counted", async () => {
+  const site = await startNewAPI({ pow: { prefix: POW_PREFIX, difficulty: 10 }, checkedInToday: true });
+  try {
+    const md = runtimeOf(await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() }));
+    const result = await pressCheckin(md, powOpts(site));
+    assert.equal(result.outcome, "done", JSON.stringify(result));
   } finally {
     await site.close();
   }

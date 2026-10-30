@@ -155,9 +155,10 @@ newapi/<siteLabel>/<group>/<model>
 2. 找一个 8 位十六进制 `nonce`，使 `SHA-256(prefix + nonce)` 开头有 `difficulty` 个 0 比特
 3. `POST /api/user/checkin?pow_challenge=<id>&pow_nonce=<nonce>`
 
-这不是人机验证，能算，所以插件自己算（`src/pow.mjs`）。几个实现细节：
+这不是人机验证，能算，所以插件自己算（`src/runanytime.mjs`）。几个实现细节：
 
-- **只有名单里的主机才会去问题目**（`POW_HOSTS`）。普通 New API 没有这个接口，每次都问一遍是白花一个请求。
+- **只有名单里的主机才会去问题目**（`HOSTS`）。普通 New API 没有这个接口，每次都问一遍是白花一个请求。
+- **不读签到状态，也不看 Turnstile**。这个站点的状态接口和 `/api/status` 都挂着 Turnstile：读了只会得到「去它的 App 里签到」，而带访问令牌的 PoW 签到本身是通的。所以它直接取题、算题、提交；「今天已经签过」由站点自己的回答说明。
 - **题目是一次性的**：算题、等请求都可能让它过期。站点回「pow 不对」时，插件重新要一道题再试**一次**，不重放旧题，也不会无限重试。
 - `difficulty` 按**位**算，不按字节；不满一个字节的部分用位掩码判断。8 位十六进制是 32 位计数器的写法，站点也是把字符串拼上去再哈希的，所以这里必须哈希 ASCII 字符而不是整数。
 - 解不出来（难度过高或超出时间预算）时返回 `failed` 并说明原因，不会静默跳过。
@@ -170,7 +171,7 @@ newapi/<siteLabel>/<group>/<model>
 
 | host | 差异 | 文件 |
 | --- | --- | --- |
-| `runanytime.hxi.me` | 签到前多一道 PoW | `src/pow.mjs` |
+| `runanytime.hxi.me` | 签到前多一道 PoW；状态接口挂着 Turnstile，所以签到不读状态 | `src/runanytime.mjs` |
 | `hyxware.com` | 一个 token 可以同时勾多个分组；`/api/token/` 列表只回 id/name/key/status，分组和额度在详情里 | `src/hyxware.mjs` |
 
 ### hyxware.com
@@ -274,7 +275,7 @@ npm run live
 - `src/fetch.mjs`：按分组选 key、还原 model、认证头。
 - `src/usage.mjs`：余额与用量窗口。
 - `src/checkin.mjs`：签到、CF/Turnstile 检测、PoW 站点。
-- `src/pow.mjs`：工作量证明的求解（SHA-256 前导零位）。
+- `src/runanytime.mjs`：runanytime.hxi.me 的签到（PoW 求解、不读状态）。
 - `src/sites.mjs`：按 host 分派特化站点；名单之外走原版路径。
 - `src/hyxware.mjs`：hyxware.com 的 token 读法（多分组 token、列表缺字段）。
 - `src/state.mjs`：分组表、缓存、按分组取 key。

@@ -31,7 +31,7 @@ function hostnameOf(base) {
  * 这个地址该用哪份特化实现，没有就返回 null。
  *
  * `hosts` 只给测试用：把它当作「这些 host 就是 hyxware」，让本机 mock
- * 冒充名单里的站点。与 pow.mjs 的 `isPowSite(base, hosts)` 同一个做法。
+ * 冒充名单里的站点。与 runanytime.mjs 的 `isRunAnyTimeSite(base, hosts)` 同一个做法。
  */
 export function siteFor(base, hosts) {
   const host = hostnameOf(base);

@@ -6,7 +6,7 @@
 // 所以这里从不只看状态码。
 
 import { USER_AGENT, fetchWithTimeout, isMaskedKey, joinURL } from "./util.mjs";
-import { parsePowChallenge } from "./pow.mjs";
+import { parseChallenge } from "./runanytime.mjs";
 import { t } from "./i18n.mjs";
 
 // Magpie 给一个供应商的整个模型钩子只有 20 秒（gui/providers.go 的 Refetch）。
@@ -594,8 +594,8 @@ export async function getCheckinStatus(base, token, userId, opts = {}) {
 }
 
 /**
- * 站点的 PoW 题目。站点没有这道门槛时返回 null——404/405 是正常的，
- * 说明它就是个普通 New API。
+ * 站点的 PoW 题目（只有 runanytime 那类站点有）。站点没有这道门槛时
+ * 返回 null——404/405 是正常的，说明它就是个普通 New API。
  */
 export async function getPowChallenge(base, token, userId, opts = {}) {
   try {
@@ -606,7 +606,7 @@ export async function getPowChallenge(base, token, userId, opts = {}) {
       query: { action: "checkin" },
       timeout: opts.timeout ?? 8000,
     });
-    return parsePowChallenge(payload);
+    return parseChallenge(payload);
   } catch (e) {
     if (e instanceof ChallengeError || isAuthError(e)) throw e;
     if (e?.status === 404 || e?.status === 405) return null;
@@ -642,6 +642,11 @@ export async function postCheckin(base, token, userId, opts = {}) {
       if (e instanceof ChallengeError) throw e;
       if (isAuthError(e)) throw e;
       const status = /** @type {ApiError} */ (e)?.status;
+      // 200 但 success:false，是站点在回答「今天已经签过」「签到没开」
+      // 这类话，不是故障：如实回给调用方。
+      if (status === 200) {
+        return { success: false, message: String(e?.message ?? "") };
+      }
       // 400/422 是站点在说「这次签到不行」（PoW 不对、参数缺了），
       // 不是网络故障：如实回给调用方，别再试下一种布局。
       if (status === 400 || status === 422) {

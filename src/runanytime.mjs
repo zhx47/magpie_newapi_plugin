@@ -1,6 +1,7 @@
-// 工作量证明（PoW）：有些魔改的 New API 站点在签到前加了一道计算题。
+// runanytime.hxi.me：签到前要先解一道工作量证明的站点。
 //
-// 流程是三步：
+// 站长在 New API 的签到接口前加了一道题，流程是三步：
+//
 //   1. GET /api/user/pow/challenge?action=checkin
 //      → { challenge_id, prefix, difficulty, expires_at }
 //   2. 找一个 8 位十六进制 nonce，使 SHA-256(prefix + nonce) 的开头有
@@ -11,23 +12,25 @@
 // ASCII 字符，而不是 4 字节整数。8 位正好是 32 位计数器的十六进制写法。
 //
 // 这不是绕过任何东西：站点要求算，插件就算。算不出来就如实报告。
+//
+// 这个文件只服务名单里的主机（sites.mjs 按它分派签到）：题目接口只有它有，
+// 别的站点每次都问一遍就是白花一个请求。
 
 import { createHash } from "node:crypto";
 
 /** nonce 的位数：4 字节计数器的十六进制写法。 */
 export const NONCE_DIGITS = 8;
 
-/** 站点名（主机名）→ 签到要带 PoW。 */
-export const POW_HOSTS = ["runanytime.hxi.me"];
+/** 站点名（主机名）：签到要带 PoW。 */
+export const HOSTS = ["runanytime.hxi.me"];
 
 /**
  * 这个站点的签到要不要先解 PoW。
  *
- * 只认名单：多问一次题目就是一个请求，而签到一天只有一次，
- * 记「哪些站点有 PoW」省下的那点又会让同一主机的两个面板串味
- * （mock 站点就共用一台上机）。`hosts` 只给测试用。
+ * 只认名单：多问一次题目就是一个请求。`hosts` 只给测试用，
+ * 让本机 mock 冒充名单里的站点（与 sites.mjs 的 `specialHosts` 同一个做法）。
  */
-export function isPowSite(base, hosts = POW_HOSTS) {
+export function isRunAnyTimeSite(base, hosts = HOSTS) {
   try {
     return hosts.includes(new URL(String(base)).hostname.toLowerCase());
   } catch {
@@ -64,7 +67,7 @@ export function digestMatches(digest, difficulty) {
  * 站点给的题目。字段不对就当没有题目——拿半个题目去算，
  * 结果只会是一个被拒的请求。
  */
-export function parsePowChallenge(payload) {
+export function parseChallenge(payload) {
   const data = payload?.data;
   if (!data || typeof data !== "object") return null;
   const challengeId = String(data.challenge_id ?? "").trim();
@@ -100,7 +103,7 @@ export class PowError extends Error {
  *
  * `now` 与 `budgetMs` 可以覆盖，测试用它把「算不完」变成几毫秒。
  */
-export function solvePow(challenge, { now = Date.now(), budgetMs = MAX_SOLVE_MS } = {}) {
+export function solveChallenge(challenge, { now = Date.now(), budgetMs = MAX_SOLVE_MS } = {}) {
   let budget = budgetMs;
   if (challenge.expiresAt > 0) {
     const left = challenge.expiresAt * 1000 - now - EXPIRY_MARGIN_MS;

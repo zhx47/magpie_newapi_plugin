@@ -1424,7 +1424,7 @@ magpie_newapi_plugin/
     fetch.mjs            # 分组选 key、model 还原、认证头、流式转发
     usage.mjs            # 余额/已用/分组/缺 key/签到状态
     checkin.mjs          # 签到、开关、CF/Turnstile 检测
-    pow.mjs              # 工作量证明求解（runanytime 那类站点）
+    runanytime.mjs       # runanytime.hxi.me：PoW 求解，签到前不读状态
     sites.mjs            # 按 host 分派特化站点，名单外走原版路径
     hyxware.mjs          # hyxware.com：多分组 token、列表缺分组与额度
     state.mjs            # 分组表、缓存、按分组取 key
@@ -1526,10 +1526,20 @@ m accounts checkin
 
 | host | 差异 | 文件 |
 | --- | --- | --- |
-| `runanytime.hxi.me` | 签到前多一道工作量证明 | `src/pow.mjs` |
+| `runanytime.hxi.me` | 签到前多一道工作量证明；状态接口挂着 Turnstile，所以签到不读状态 | `src/runanytime.mjs` |
 | `hyxware.com` | 一个 token 可勾多个分组；`/api/token/` 列表不给 `group` 和额度字段 | `src/hyxware.mjs` |
 
-### 15.1 hyxware.com
+### 15.1 runanytime.hxi.me
+
+签到前多一道工作量证明，而且**不能先读状态**：
+
+- `GET /api/user/pow/challenge?action=checkin` → `{challenge_id, prefix, difficulty, expires_at}`
+- 解 `SHA-256(prefix + 8 位十六进制 nonce)` 的前 `difficulty` 个 0 比特
+- `POST /api/user/checkin?pow_challenge=<id>&pow_nonce=<nonce>`
+
+它的签到状态接口和 `/api/status` 都挂着 Turnstile（`turnstile_check: true`），通用路径会因为「站点要验证码」直接回 `captcha`，提示用户去它的 App 里签到——但带访问令牌的 PoW 签到本身是通的。所以这个站点**不读状态、不看 Turnstile**，直接取题、算题、提交；「今天已经签过」由站点自己的回答说明。题是一次性的，被站点说 PoW 不对就重新要一道再试一次。
+
+### 15.2 hyxware.com
 
 两处差异，都在 token 读取上：
 
