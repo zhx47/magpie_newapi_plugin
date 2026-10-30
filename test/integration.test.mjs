@@ -12,7 +12,10 @@ import { signIn, validateAccessToken } from "../src/signin.mjs";
 import { groupsOf, knownAccounts } from "../src/state.mjs";
 import { syncAccount } from "../src/sync.mjs";
 import { formatQuota, quotaAsNumber, quotaInfo } from "../src/util.mjs";
-import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
+import { ACCESS_TOKEN, DEFAULT_KEY, SVIP_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
+
+/** 一条同时服务两个分组的 token（hyxware 那种站点才有）。 */
+const COMBO_KEY = SVIP_KEY;
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "newapi-plugin-test-"));
@@ -861,6 +864,109 @@ test("a sync that cannot reach the site changes nothing", async () => {
     });
     assert.equal(JSON.stringify(out.groups), before, "连不上就什么都不动");
     assert.equal(out.changed, false);
+  } finally {
+    await site.close();
+  }
+});
+
+// ---- 按 host 特化的站点（hyxware.com） --------------------------------------
+//
+// 这些站点在 New API 上做了自己的改动，读法与通用路径不同。测试让本机
+// mock 冒充名单里的站点（specialHosts），与 pow.mjs 的做法一致。
+
+/** 让 sync/signIn 把一个本机 mock 当成名单里的站点。 */
+function asSpecial(site) {
+  return [new URL(site.base).hostname];
+}
+
+test("hyxware: a lean list is filled from the token details", async () => {
+  // 这个站点的列表只回 id/name/key/status：分组和额度在详情里。
+  // 少了分组，一个分组都找不到 key；少了额度，token 会被当成用完了。
+  const site = await startNewAPI({ leanList: true, reveal: "allow" });
+  try {
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, {
+      directory: tmpdir(),
+      specialHosts: asSpecial(site),
+    });
+    const md = authOf(signed).metadata;
+    assert.equal(key(md, "default"), DEFAULT_KEY, "详情补出的分组和 key");
+    assert.equal(key(md, "vip"), VIP_KEY);
+    assert.deepEqual(pend(md), ["svip"], "只有真没有 token 的分组才缺 key");
+    assert.ok(site.state.detailsRead >= 2, "列表缺字段时读了详情");
+  } finally {
+    await site.close();
+  }
+});
+
+test("hyxware: one token serving two groups keys both of them", async () => {
+  // 魔改点：一个 token 可以同时勾多个分组（groups 是数组）。
+  // 聚合 token 只建了一条，但两个分组都能用它——两个分组都要拿到 key。
+  const site = await startNewAPI({ leanList: true, reveal: "allow" });
+  try {
+    site.state.tokens = [
+      { id: 7, name: "combo", key: COMBO_KEY, group: "vip", groups: ["vip", "svip"], status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
+    ];
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, {
+      directory: tmpdir(),
+      specialHosts: asSpecial(site),
+    });
+    const md = authOf(signed).metadata;
+    assert.equal(key(md, "vip"), COMBO_KEY, "token 自己的分组");
+    assert.equal(key(md, "svip"), COMBO_KEY, "它另外勾的分组也是同一条 key");
+    assert.deepEqual(pend(md), ["default"]);
+  } finally {
+    await site.close();
+  }
+});
+
+test("hyxware: a group only a token knows about joins the table", async () => {
+  // 站点公开的分组表里没有 A，但一条 A,B 的 token 说明 A 能用：
+  // A 也要进表，否则它永远没有 key。
+  const site = await startNewAPI({ leanList: true, reveal: "allow" });
+  try {
+    site.state.tokens = [
+      { id: 8, name: "combo", key: COMBO_KEY, group: "vip", groups: ["vip", "extra"], status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
+    ];
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, {
+      directory: tmpdir(),
+      specialHosts: asSpecial(site),
+    });
+    const md = authOf(signed).metadata;
+    assert.deepEqual(Object.keys(groupsOf(md)).sort(), ["default", "extra", "svip", "vip"]);
+    assert.equal(key(md, "extra"), COMBO_KEY, "token 认领的分组进了表并拿到 key");
+  } finally {
+    await site.close();
+  }
+});
+
+test("hyxware: the sync keeps the keys it just found", async () => {
+  const site = await startNewAPI({ leanList: true, reveal: "allow" });
+  try {
+    site.state.tokens = [
+      { id: 9, name: "combo", key: COMBO_KEY, group: "vip", groups: ["vip", "svip"], status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
+    ];
+    const md = runtimeOf(
+      await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir(), specialHosts: asSpecial(site) }),
+    );
+    const out = await syncAccount(md, { force: true, specialHosts: asSpecial(site) });
+    assert.equal(out.groups.vip.key, COMBO_KEY, "同步后还是同一条 key");
+    assert.equal(out.groups.svip.key, COMBO_KEY);
+  } finally {
+    await site.close();
+  }
+});
+
+test("hyxware: a plain site alongside it is unaffected", async () => {
+  // 通用站点不该被特化逻辑碰到：同一个 mock，不传 specialHosts 时
+  // 分组表就按站点给的那三个来。
+  const site = await startNewAPI({});
+  try {
+    site.state.tokens = [
+      { id: 10, name: "combo", key: COMBO_KEY, group: "vip", groups: ["vip", "extra"], status: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true },
+    ];
+    const signed = await signIn({ baseURL: site.base, accessToken: ACCESS_TOKEN }, { directory: tmpdir() });
+    const md = authOf(signed).metadata;
+    assert.deepEqual(Object.keys(groupsOf(md)).sort(), ["default", "svip", "vip"], "没有 extra");
   } finally {
     await site.close();
   }

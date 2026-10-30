@@ -120,10 +120,16 @@ const GROUPS = {
  *   checkinEnabled: bool
  *   turnstileCheck: bool                 （/api/status 说需要 Turnstile）
  *   quotaPerUnit, quota, usedQuota（额度单位、余额、已用额度）
+ *   leanList: bool                       （列表只回 id/name/key/status，分组与额度在详情里）
+ *   multiGroup: bool                     （一个 token 的 groups 是数组，可勾多个分组）
  */
 export async function startNewAPI(options = {}) {
   const state = {
     reveal: options.reveal ?? "allow",
+    // 列表接口是否精简、token 是否能勾多个分组：hyxware 那类站点。
+    leanList: options.leanList ?? false,
+    multiGroup: options.multiGroup ?? false,
+    detailsRead: 0,
     challenge: options.challenge ?? "",
     pricingClosed: options.pricingClosed ?? false,
     checkinEnabled: options.checkinEnabled ?? true,
@@ -268,8 +274,28 @@ export async function startNewAPI(options = {}) {
     if (url.pathname === "/api/token/" && req.method === "GET") {
       if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
       // maskKeys：列表里也是明文（老版本、或站点没开掩码）
-      const items = state.tokens.map((t) => ({ ...t, key: state.maskKeys ? t.key : maskKey(t.key) }));
+      // leanList：只回 id/name/key/status/时间，分组和额度只在详情里。
+      const items = state.tokens.map((t) => {
+        const key = state.maskKeys ? t.key : maskKey(t.key);
+        if (!state.leanList) return { ...t, key };
+        return { id: t.id, name: t.name, key, status: t.status, created_time: 1, accessed_time: 0 };
+      });
       json({ success: true, data: { page: 1, page_size: 100, total: items.length, items } });
+      return;
+    }
+
+    const detail = url.pathname.match(/^\/api\/token\/(\d+)$/);
+    if (detail && req.method === "GET") {
+      if (bearer !== ACCESS_TOKEN) return json({ success: false, message: "unauthorized" }, 401);
+      const t = state.tokens.find((x) => x.id === Number(detail[1]));
+      if (!t) return json({ success: false, message: "token not found" }, 404);
+      state.detailsRead += 1;
+      // multiGroup 的站点用 groups 数组，可以勾多个分组。
+      const groups = Array.isArray(t.groups) && t.groups.length ? t.groups : [t.group ?? "default"];
+      json({
+        success: true,
+        data: { ...t, key: maskKey(t.key), groups, group: groups[0], auto_groups: null },
+      });
       return;
     }
 

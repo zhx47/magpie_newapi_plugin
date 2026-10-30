@@ -20,10 +20,10 @@ import {
   getUserGroups,
   isAuthError,
   listModelsForKey,
-  listTokens,
   revealTokenKeys,
   tokenUsable,
 } from "./api.mjs";
+import { groupsFromTokens, readTokenList, siteFor } from "./sites.mjs";
 import { caches, cacheKey, groupsOf, sortGroups } from "./state.mjs";
 import { cleanLabel, isMaskedKey, normalizeApiKey } from "./util.mjs";
 import { t } from "./i18n.mjs";
@@ -122,7 +122,7 @@ export async function keysFromTokens({ base, token, userId, groups, tokens, fetc
  * 一旦对不上就像「什么都没建成」，于是被无限重试——一个分组就这样堆出
  * 一百多个 token。
  */
-export async function createKey({ base, token, userId, label, group, tokens, fetchImpl }) {
+export async function createKey({ base, token, userId, label, group, tokens, fetchImpl, specialHosts }) {
   const before = new Set((tokens ?? []).map((t) => t.id));
   const stamp = Date.now().toString(36).slice(-5);
   const safe = String(group).replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 20);
@@ -134,8 +134,10 @@ export async function createKey({ base, token, userId, label, group, tokens, fet
     return undefined;
   }
   try {
-    const after = (await listTokens(base, token, userId, { fetchImpl })).filter((t) => (t.group || "default") === group);
-    const made = after.filter((t) => !before.has(t.id)).sort((a, b) => b.id - a.id)[0];
+    // 特化站点读回来的列表已经按分组拆好了（一个 token 服务的每个分组
+    // 各一条），所以这里一律按 `group` 认。
+    const after = await readTokenList({ base, token, userId, fetchImpl, specialHosts });
+    const made = after.filter((t) => (t.group || "default") === group).filter((t) => !before.has(t.id)).sort((a, b) => b.id - a.id)[0];
     if (!made) return undefined;
     const revealed = await revealTokenKeys(base, token, userId, [made.id], { fetchImpl });
     return revealed.get(made.id);
@@ -150,7 +152,7 @@ export async function createKey({ base, token, userId, label, group, tokens, fet
  * 返回 `{ groups, changed, notes }`：`groups` 是要写回的整张表，
  * 什么都没变时就是原来那张。站点连不上就原样不动。
  */
-export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Date.now(), force = false, budgetMs = 8000 } = {}) {
+export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Date.now(), force = false, budgetMs = 8000, specialHosts } = {}) {
   const base = String(md?.baseURL ?? "");
   const token = String(md?.accessToken ?? md?.token ?? "");
   const userId = String(md?.userId ?? "");
@@ -189,23 +191,24 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     notes.push(`读不到站点的分组：${String(e?.message ?? e).slice(0, 100)}`);
   }
 
+  // 站点懂的所有分组：站点自己的分组表，加上特化站点才有的
+  // 「token 另外认领的分组」（hyxware 的聚合 token：分组表里没有 A，
+  // 但一条 A,B 的 token 说明 A 能用）。通用站点不读这一遍，
+  // 分组表仍然完全以站点为准。
+  const special = siteFor(base, specialHosts);
+  let tokens = special ? (await inTime(readTokenList({ base, token, userId, fetchImpl, specialHosts }).catch(() => []))) ?? [] : null;
+  const extraGroups = special && tokens ? groupsFromTokens(base, tokens, specialHosts) : [];
+
   // 站点给了分组表就以它为准；读不到就**从账号现有的表出发**。
   // 从空表出发会把整张表（包括手填的 key）一起清掉——很多站点把
   // /api/user/self/groups 藏在权限后面，那个接口一 403，账号就空了。
   const next = {};
   if (siteGroups) {
     for (const [name, info] of Object.entries(siteGroups)) {
-      const old = before[name] ?? {};
-      const entry = {};
-      const ratio = Number(info?.ratio);
-      if (ratio > 0) entry.ratio = ratio;
-      if (typeof info?.desc === "string" && info.desc) entry.desc = info.desc;
-      if (old.key) entry.key = old.key;
-      // 问题是针对「站点手里的那个 key」的，不是针对分组：
-      // 只要还持有当初被判定的那个 key，就保留这个判定。
-      if (old.problem && old.problem !== "gone" && old.key) entry.problem = old.problem;
-      if (!entry.key && old.tried) entry.tried = true;
-      next[name] = entry;
+      next[name] = carried(info, before[name]);
+    }
+    for (const name of extraGroups) {
+      if (!(name in next)) next[name] = carried(before[name] ?? {}, before[name]);
     }
     // 站点不再提供的分组：key 留着（分组可能回来），标成 gone，
     // 这样没有地方会列出或使用它。
@@ -215,15 +218,21 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     }
   } else {
     for (const [name, old] of Object.entries(before)) next[name] = { ...old };
+    for (const name of extraGroups) {
+      if (!(name in next)) next[name] = carried(before[name] ?? {}, before[name]);
+    }
   }
 
-  const siteNames = siteGroups ? Object.keys(siteGroups) : Object.keys(before);
+  const siteNames = [...new Set([...Object.keys(siteGroups ?? {}), ...extraGroups, ...Object.keys(before)])];
 
   // 没有 key 的分组：先看站点已有的 token，允许创建时再建新的。
-  let needKeys = sortGroups(siteNames.filter((g) => !next[g]?.key && !next[g]?.tried));
+  let needKeys = sortGroups(siteNames.filter((g) => !next[g]?.key && !next[g]?.tried && next[g]?.problem !== "gone"));
   if (needKeys.length) {
-    // 读不到就把这次要 key 的尝试留到下一次：这不是「分组没有 key」。
-    const tokens = (await inTime(listTokens(base, token, userId, { fetchImpl }).catch(() => []))) ?? [];
+    // 通用站点到这一步才读 token 列表，行为和以前一样；特化站点上面
+    // 已经为了分组读过了，直接用。
+    if (!tokens) {
+      tokens = (await inTime(readTokenList({ base, token, userId, fetchImpl, specialHosts }).catch(() => []))) ?? [];
+    }
     const found = await keysFromTokens({ base, token, userId, groups: needKeys, tokens, fetchImpl });
     for (const [group, key] of Object.entries(found)) {
       next[group] = { ...next[group], key };
@@ -234,7 +243,9 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
     if (autoCreate && needKeys.length && left() > 1500) {
       for (const group of needKeys) {
         if (left() <= 0) break;
-        const key = await inTime(createKey({ base, token, userId, label: md?.siteLabel ?? "", group, tokens, fetchImpl }));
+        const key = await inTime(
+          createKey({ base, token, userId, label: md?.siteLabel ?? "", group, tokens, fetchImpl, specialHosts }),
+        );
         if (key) {
           next[group] = { ...next[group], key };
           delete next[group].tried;
@@ -274,6 +285,24 @@ export async function syncAccount(md, { fetchImpl, autoCreate = false, now = Dat
 
 function same(a, b) {
   return JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+}
+
+/**
+ * 站点表里的一行，带上账号原来那条 key 和它的判定。
+ *
+ * 问题是针对「站点手里的那个 key」的，不是针对分组：只要还持有当初
+ * 被判定的那个 key，就保留这个判定；gone 例外，站点这次仍然提供这个
+ * 分组，旧判定已经过时。
+ */
+function carried(info, old = {}) {
+  const entry = {};
+  const ratio = Number(info?.ratio);
+  if (ratio > 0) entry.ratio = ratio;
+  if (typeof info?.desc === "string" && info.desc) entry.desc = info.desc;
+  if (old?.key) entry.key = old.key;
+  if (old?.problem && old.problem !== "gone" && old.key) entry.problem = old.problem;
+  if (!entry.key && old?.tried) entry.tried = true;
+  return entry;
 }
 
 function sorted(map) {

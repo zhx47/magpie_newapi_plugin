@@ -19,7 +19,6 @@ import {
   getUserSelf,
   getPricing,
   isAuthError,
-  listTokens,
   revealTokenKeys,
   tokenUsable,
 } from "./api.mjs";
@@ -33,6 +32,7 @@ import {
 } from "./util.mjs";
 import { TtlCache, cacheKey, groupsOf, knownAccounts, savedAccount } from "./state.mjs";
 import { checkKey, createKey } from "./sync.mjs";
+import { groupsFromTokens, readTokenList } from "./sites.mjs";
 import { createdIn, forgetLogin, loginKey, markAsked, wasAsked } from "./session.mjs";
 import { t } from "./i18n.mjs";
 
@@ -69,7 +69,7 @@ export function tokensByGroup(tokens, defaultGroupName) {
 const surveys = new TtlCache(60_000);
 
 /** 最初几次调用查到的东西：提问和最终结果都用它。 */
-async function surveyOnce(inputs, fetchImpl) {
+async function surveyOnce(inputs, fetchImpl, specialHosts) {
   const base = normalizeBase(inputs?.baseURL);
   const token = String(inputs?.accessToken ?? "").trim();
   const userId = String(inputs?.userId ?? "").trim();
@@ -106,7 +106,7 @@ async function surveyOnce(inputs, fetchImpl) {
   const [groups, pricing, tokens] = await Promise.all([
     getUserGroups(base, token, userId, { fetchImpl }).catch(() => ({})),
     getPricing(base, token, userId, { fetchImpl }).catch(() => null),
-    listTokens(base, token, userId, { fetchImpl }).catch(() => []),
+    readTokenList({ base, token, userId, fetchImpl, specialHosts }).catch(() => []),
   ]);
 
   const byGroup = tokensByGroup(tokens, self.group);
@@ -142,6 +142,13 @@ async function surveyOnce(inputs, fetchImpl) {
     if (key) fromTokens[group] = key;
   }
 
+  // 特化站点：token 认领、而站点分组表里没有的分组。
+  // 聚合 token 服务 A,B 而分组表只公开 B 时，A 也得进账号，否则它
+  // 永远拿不到 key。通用站点这一项是空的（见 sites.mjs）。
+  for (const group of groupsFromTokens(base, tokens, specialHosts)) {
+    if (!(group in groups)) groups[group] = { ratio: 0, desc: "" };
+  }
+
   return { base, token, userId, status, self, unreachable, groups, pricing, tokens, revealed, byGroup, fromTokens };
 }
 
@@ -151,12 +158,12 @@ function newestToken(list) {
 }
 
 /** survey 的结果按它的输入缓存一分钟。 */
-function survey(inputs, fetchImpl) {
+function survey(inputs, fetchImpl, specialHosts) {
   const base = normalizeBase(inputs?.baseURL);
   const token = String(inputs?.accessToken ?? "").trim();
-  if (!base || !token) return surveyOnce(inputs, fetchImpl);
+  if (!base || !token) return surveyOnce(inputs, fetchImpl, specialHosts);
   const key = cacheKey(base, "signin", token, String(inputs?.userId ?? ""));
-  return surveys.getOr(key, 60_000, () => surveyOnce(inputs, fetchImpl));
+  return surveys.getOr(key, 60_000, () => surveyOnce(inputs, fetchImpl, specialHosts));
 }
 
 /**
@@ -199,7 +206,7 @@ function pendingGroupsOf(found, keys) {
  * 每个缺 key 的分组各占一个输入框，标题就是分组名；已回答的问题会传回来，
  * 所以再问一次就是问下一个。
  */
-export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
+export async function nextQuestion(inputs, { directory, fetchImpl, specialHosts } = {}) {
   // Magpie 已经有的账号不需要凭记忆重敲令牌：第一问就把本插件登录过的站点
   // 列出来，选中一个就等于回答了站点地址、令牌、user id 和标识。
   inputs = resolvePick(inputs, directory);
@@ -228,7 +235,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
   if (inputs?.userId === undefined) return prompt("userId");
   if (inputs?.siteLabel === undefined) return prompt("siteLabel");
 
-  const found = await survey(inputs, fetchImpl);
+  const found = await survey(inputs, fetchImpl, specialHosts);
   if (found.failed) {
     // 令牌不行：再问一遍，别继续问那些没有令牌根本答不了的问题。
     return { ...prompt("accessToken"), message: `${found.failed}\n${t("Access token")}` };
@@ -273,6 +280,7 @@ export async function nextQuestion(inputs, { directory, fetchImpl } = {}) {
         group,
         tokens: found.tokens ?? [],
         fetchImpl,
+        specialHosts,
       }).catch(() => undefined);
       markAsked(session, group, key);
     }
@@ -377,9 +385,9 @@ export function resolvePick(inputs, directory) {
  * 完整的登录。`directory` 是 Magpie 的配置目录，
  * 已保存的账号就是从这里读的。
  */
-export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
+export async function signIn(rawInputs, { directory, fetchImpl, specialHosts } = {}) {
   const inputs = resolvePick(rawInputs, directory);
-  const found = await survey(inputs, fetchImpl);
+  const found = await survey(inputs, fetchImpl, specialHosts);
   if (found.failed) return { type: "failed", error: found.failed };
   const { base, token, userId, status, self, unreachable, groups, pricing, tokens } = found;
 
@@ -405,7 +413,7 @@ export async function signIn(rawInputs, { directory, fetchImpl } = {}) {
     // 服务器）在这里补上；要没要到都记进会话，免得 authorize 再建一轮。
     const todo = sortGroups(siteGroups.filter((g) => !keys[g] && !wasAsked(session, g)));
     for (const group of todo) {
-      const key = await createKey({ base, token, userId, label, group, tokens, fetchImpl }).catch(() => undefined);
+      const key = await createKey({ base, token, userId, label, group, tokens, fetchImpl, specialHosts }).catch(() => undefined);
       markAsked(session, group, key);
       if (key) keys[group] = key;
     }

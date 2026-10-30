@@ -164,6 +164,31 @@ newapi/<siteLabel>/<group>/<model>
 
 > 这段适配参考了我们自己魔改的 octopus（`internal/sitesync/runanytime.go`），连参考解都一样：`checkin:1792565712:6573:57c20d569dc58d08:` + `00004851` 满足难度 14，测试里拿它做回归。
 
+## 按 host 特化的站点
+
+有些站点在 New API 上做了自己的改动，接口形状和原版不一样。这些差异**不进通用代码**：每个站点一个文件，`src/sites.mjs` 按 host 分派，名单之外的站点走原版路径，行为和没有这些文件时完全一致。
+
+| host | 差异 | 文件 |
+| --- | --- | --- |
+| `runanytime.hxi.me` | 签到前多一道 PoW | `src/pow.mjs` |
+| `hyxware.com` | 一个 token 可以同时勾多个分组；`/api/token/` 列表只回 id/name/key/status，分组和额度在详情里 | `src/hyxware.mjs` |
+
+### hyxware.com
+
+原版站点的 `GET /api/token/` 一次给出 token 的全貌，一个 token 只服务一个分组。这个站点两处不同：
+
+```
+GET  /api/token/?p=0&page_size=100    → { id, name, key(掩码), status, created_time, accessed_time }
+GET  /api/token/42                    → { group: "chat", groups: ["chat"], unlimited_quota: true, ... }
+POST /api/token/42/key                → { key: "..." }        （GET 这条在它上面是 404）
+```
+
+列表里没有 `group`，通用代码会把所有 token 都归到默认分组，于是每个分组都判成缺 key、全要手填；没有 `unlimited_quota`，`tokenUsable` 又会把它们当成「用完了」。
+
+`src/hyxware.mjs` 把列表读成通用代码期待的形状：逐个问详情拿分组和额度，再把每个 token 按它服务的**每一个**分组各输出一条（同一个 key 出现多次，分组由 `group` 和 `groups` 拼接去重）。于是通用逻辑「每个分组取最新一条 token」自然给聚合 token 覆盖到的每个分组都拿到同一条 key。
+
+聚合 token 服务 `A,B` 而站点公开的分组表里只有 `B` 时，`A` 也会被并进账号的分组表——否则它永远没有 key。这一步只在特化站点上发生（`sites.mjs` 的 `groupsFromTokens`），通用站点返回空数组。
+
 ## Provider 选项
 
 | 选项 | 默认 | 作用 |
@@ -250,6 +275,8 @@ npm run live
 - `src/usage.mjs`：余额与用量窗口。
 - `src/checkin.mjs`：签到、CF/Turnstile 检测、PoW 站点。
 - `src/pow.mjs`：工作量证明的求解（SHA-256 前导零位）。
+- `src/sites.mjs`：按 host 分派特化站点；名单之外走原版路径。
+- `src/hyxware.mjs`：hyxware.com 的 token 读法（多分组 token、列表缺字段）。
 - `src/state.mjs`：分组表、缓存、按分组取 key。
 - `test/mock-newapi.mjs`：本地假站点，覆盖掩码 key、拒绝 reveal、Turnstile、CF 页面、签到旧路径等。
 

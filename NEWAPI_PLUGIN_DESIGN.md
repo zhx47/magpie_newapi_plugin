@@ -1424,6 +1424,9 @@ magpie_newapi_plugin/
     fetch.mjs            # 分组选 key、model 还原、认证头、流式转发
     usage.mjs            # 余额/已用/分组/缺 key/签到状态
     checkin.mjs          # 签到、开关、CF/Turnstile 检测
+    pow.mjs              # 工作量证明求解（runanytime 那类站点）
+    sites.mjs            # 按 host 分派特化站点，名单外走原版路径
+    hyxware.mjs          # hyxware.com：多分组 token、列表缺分组与额度
     state.mjs            # 分组表、缓存、按分组取 key
     session.mjs          # 一次登录的中间状态（只在内存）
   test/
@@ -1516,3 +1519,34 @@ m accounts checkin
 3. 把某个分组的 key 删掉后重新登录，`Group keys` 一行的提示与回填流程符合预期。
 4. 在开启 Turnstile 的站点上，`magpie accounts checkin` 显示 captcha，且不会发出注定失败的 POST。
 5. 只有 `/api/user/checkin` 的老布局站点（如 `v1.0.0-rc.46`）签到显示 `done`/`claimed`，而不是 404。
+
+## 15. 特化站点（按 host 分派）
+
+有些站点在 New API 上做了自己的改动。这些差异**不写进通用代码**，每个站点一个文件、一份 host 名单，由 `src/sites.mjs` 分派；名单之外的站点走原版路径，行为与没有这些文件时完全一致。
+
+| host | 差异 | 文件 |
+| --- | --- | --- |
+| `runanytime.hxi.me` | 签到前多一道工作量证明 | `src/pow.mjs` |
+| `hyxware.com` | 一个 token 可勾多个分组；`/api/token/` 列表不给 `group` 和额度字段 | `src/hyxware.mjs` |
+
+### 15.1 hyxware.com
+
+两处差异，都在 token 读取上：
+
+```
+GET  /api/token/?p=0&page_size=100    → { id, name, key(掩码), status, created_time, accessed_time }
+GET  /api/token/42                    → { group: "chat", groups: ["chat", "claude"], unlimited_quota: true, ... }
+POST /api/token/42/key                → { key: "..." }     （GET 这条在这里是 404）
+```
+
+通用路径按 `group` 给分组找 key，于是：
+
+1. 列表没有 `group` → 所有 token 归到默认分组，每个分组都判成缺 key，全要手填；
+2. 列表没有 `unlimited_quota` → `tokenUsable` 把它们当成「用完了」，一个都不参与；
+3. `groups` 是数组 → 聚合 token 覆盖到的分组没有单独的 token，也会判成缺 key。
+
+`src/hyxware.mjs` 只做一件事：把列表读成通用代码期待的形状。逐个问详情拿分组与额度，把每个 token 按它服务的**每一个**分组各输出一条（同一个 key 出现多次，分组由 `group` 与 `groups` 拼接去重）。通用逻辑「每个分组取最新一条 token」于是给每个分组都拿到那条 key。
+
+聚合 token 服务 `A,B` 而站点公开的分组表只有 `B` 时，`A` 也并进账号的分组表，否则它永远没有 key。这一步由 `sites.mjs` 的 `groupsFromTokens` 实现，通用站点返回空数组。
+
+特化路径只在 `siteFor()` 命中时启用；`specialHosts` 参数只给测试用，让本机 mock 冒充名单里的站点（与 `isPowSite(base, hosts)` 同一个做法）。
