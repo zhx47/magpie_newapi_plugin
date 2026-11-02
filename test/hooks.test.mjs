@@ -288,7 +288,11 @@ test("usage answers one wallet window and the site's plan", async () => {
   try {
     const usage = await instance.auth.usage(getAuth);
     assert.equal(usage.plan, "default");
-    assert.equal(usage.user, "alice");
+    // 账号名是 accountId(站点 + 用户名),不是裸用户名:聚合站点上十几个账号
+    // 都是同一个用户名注册的,返回裸用户名它们会全叫一个名字(#4416 之后
+    // Magpie 把这个字段当显示名用)。悬停里也是这一串。
+    assert.match(usage.user, /\(alice\)$/, `站点名 + 用户名:${usage.user}`);
+    assert.notEqual(usage.user, "alice", "裸用户名会让同名的站点撞车");
     const wallet = usage.windows.find((w) => w.name === "Balance");
     // 余额和已用是同一个钱包的两端：一行、一条进度条，不是两条读数。
     assert.equal(wallet.used, 16.7, "1,000,000 spent of 6,000,000");

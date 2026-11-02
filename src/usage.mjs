@@ -97,9 +97,20 @@ export async function buildUsage(md, opts = {}) {
 
   // 不带 signIn:一次干净读取会清掉失效标记,正常工作的令牌本该如此。
   // 只有令牌被拒时,钩子才补上 "kept"。
+  //
+  // `user` 是账号的**唯一名字**,不是站点上的用户名。Magpie 从 #4416 起把这个
+  // 字段当作账号的显示名(`AccountShown`:用户起的名字 → 插件 usage 的 user →
+  // accountId),而单元聚合站点上所有账号都是同一个用户名注册的——返回
+  // `self.username` 会让十几个站点在路由页和供应商页全叫同一个名字,只能靠
+  // 悬停才分得清。返回 accountId(也就是 `${siteLabel} (${username})`,
+  // 和 metadata.accountId 一致)则与悬停里那串完全相同,没有第二套叫法。
+  //
+  // 它同时决定额度卡的键(`plugin_usage.go` 的 `q.User`,历史按
+  // `provider|user` 存),所以这也让每个站点的额度走势各归各的。
   return {
     plan: self.group || "",
-    user: self.username || "",
+    // 老账号可能只有 email(= accountId),见 state.mjs 的 knownAccounts。
+    user: md.accountId || md.email || self.username || "",
     windows,
   };
 }
