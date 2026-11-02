@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import plugin, { NewAPI } from "../index.mjs";
 import { signIn } from "../src/signin.mjs";
+import { caches } from "../src/state.mjs";
 import { USER_AGENT } from "../src/util.mjs";
 import { ACCESS_TOKEN, DEFAULT_KEY, VIP_KEY, startNewAPI } from "./mock-newapi.mjs";
 
@@ -186,6 +187,26 @@ test("provider.models prefers Responses and Messages when the option says so", a
   }
 });
 
+test("a listing that can't be read is not an error: an empty list marked fellBack", async () => {
+  // 抛错的代价:host.js 对第 2 个及以后的账号用 strict 调用,异常被吞成
+  // {models: undefined};第一个账号出错时 given.models 也是空的。两边都把
+  // 账号的 Models 记成 nil,而 nil 读作「它服务全部模型」——账号于是出现在
+  // 每个模型的候选池里,拿自己的分组 key 去请求别的站点的模型名。
+  const { site, instance, auth } = await setup({ site: { modelsDown: true } });
+  try {
+    // 登录时校验 key 已经把列表缓存下来了;读不到说的是缓存过期、
+    // 站点正好在抖的那一刻。
+    caches.modelList.clear();
+    caches.userModels.clear();
+    const models = await instance.provider.models({ models: {} }, { auth });
+    // 不抛错,给空列表:让 Magpie 保留它原来那份,而不是把它清空。
+    assert.deepEqual(Object.keys(models), [], "an empty list, not a throw");
+    assert.equal(models[Symbol.for("magpie.fellBack")], true, "marked so keepListed keeps the last list");
+  } finally {
+    await site.close();
+  }
+});
+
 test("provider.models honors exposeAllProtocols from the plugin options", async () => {
   const { site, instance, auth } = await setup({ magpie: { "expose-all-protocols": true } });
   try {
@@ -274,7 +295,9 @@ test("usage answers one wallet window and the site's plan", async () => {
     assert.equal(wallet.amount, 2);
     assert.equal(wallet.limit, 12);
     assert.equal(wallet.unit, "$");
-    assert.equal(wallet.aside, true, "不参与路由的额度比较");
+    // 不带 aside:路由看得见这个窗口,路由页才不会显示「剩余额度未知」。
+    assert.equal(wallet.aside, undefined, "参与路由的额度比较");
+    assert.ok(wallet.used >= 0 && wallet.used <= 100, "路由按这个份额排序");
     // 卡片里从不带 key。
     assert.ok(!JSON.stringify(usage).includes(VIP_KEY));
   } finally {

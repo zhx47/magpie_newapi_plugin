@@ -117,20 +117,38 @@ async function listingOf(auth, options, hostModels) {
   return { md, ...discovered, built };
 }
 
-/** 模型钩子，provider 声明与它共用这一份。 */
+/**
+ * 模型钩子,provider 声明与它共用这一份。
+ *
+ * 读不到模型时**返回空列表并打上 `magpie.fellBack`,绝不抛错**。
+ * 抛错的代价不只是少了一句解释:
+ *   - `host.js` 对第二个及以后的账号用 `strict: true` 调用,`throw` 被 catch
+ *     成 `{failed: true}`;第一个账号出错时 `given.models` 也是空的。两边都会
+ *     让 Magpie 把这个账号的 `Models` 记成 nil。
+ *   - nil 在 `plugins.go` 的 `pluginLists` / `pluginServedCatalog` 里读作
+ *     「它服务全部模型」,于是这个账号会出现在**每个**模型的候选池和路由页上,
+ *     拿自己的分组 key 去请求别的站点的裸模型名。
+ *   - `Account.Models` 带 `json:"models,omitempty"`,空数组过不了磁盘往返,
+ *     重启后又变回 nil。所以给显式空列表,并用 `magpie.fellBack` 让
+ *     `keepListed` 在有旧列表时把旧的顶上(`host.js` 认得这个标记)。
+ *
+ * 站点回答了、但只列出非聊天模型,是空列表而不是失败:下面的判断只看
+ * 「有 key,却一个分组都没答上来」。
+ */
 async function modelsFor(provider, auth, options) {
   if (!auth) return {};
   const { md, groups, built } = await listingOf(auth, options, provider?.models ?? {});
   const haveKeys = Object.values(groupsOf(md)).some((g) => g.key && !g.problem);
-  // 每个 key 都失败，或者站点什么都没回答：抛错，让 Magpie 保留原来的
-  // 列表并说明原因，而不是把选择器清空。站点回答了、但只列出非聊天模型，
-  // 那是空列表，不是错误。
   if (haveKeys && !Object.keys(groups).length) {
-    throw new Error(
+    // 原因交给 Magpie 说:它作为 listError 显示在短列表上方。
+    console.warn(
       t("New API: no models listed for {site}. Check the group keys and that the site's /v1/models answers.", {
         site: md.siteLabel ?? md.baseURL,
       }),
     );
+    const empty = {};
+    Object.defineProperty(empty, Symbol.for("magpie.fellBack"), { value: true, enumerable: false });
+    return empty;
   }
   return built.models;
 }

@@ -64,7 +64,7 @@
 | `loader(getAuth)` 每个账号运行一次，返回 `{ baseURL?, apiKey?, headers?, fetch? }`；`fetch(input, init)` 收到完整 URL + 已构造好的 headers/body。 | 用自定义 fetch 实现按分组选 key、把 `api.id` 还原成上游 model。 |
 | `options()` 在 `loader` 没给 `apiKey` 时自动用账号的 `key`。 | 账号 `key` 是 access token，不能让它被默认发到推理接口；fetch 必须删掉默认认证头，或用占位 `apiKey`。 |
 | `fetchAs` 的 header 顺序：SDK key 头 → loader headers → 网关头 → `chat.headers`。 | 自定义 fetch 最终覆盖认证头即可。 |
-| `auth.usage` 按账号运行，窗口支持 `balance`（预付钱包）、`display`（纯文本）、`used/amount/limit/unit`、`aside`。 | 余额和已用合成一个 `used/amount/limit` 窗口（带 `aside`）；缺 key 用 `display` 文本窗口。 |
+| `auth.usage` 按账号运行,窗口支持 `balance`(预付钱包)、`display`(纯文本)、`used/amount/limit/unit`、`aside`。 | 余额和已用合成一个 `used/amount/limit` 窗口(不带 `aside`,让路由看得见);缺 key 用 `display` 文本窗口。 |
 | `auth.checkin` 每个北京日每账号一次，返回 `{ outcome, credit?, streak?, message?, until? }`；`outcome` ∈ claimed/done/ineligible/inactive/captcha/failed。 | 直接映射 NewAPI 签到结果。 |
 | `auth.options` 只支持 **布尔开关**（`key/label/description/default/confirm`）。 | 协议偏好、自动建 key、暴露多协议都做成布尔开关。 |
 | 登录 method 的 `prompts` 支持 `text`、`password`、`select`，支持 `when`/`validate`。 | access token 用 `password`；分组 key 回填用 `text`。 |
@@ -499,7 +499,7 @@ windows = [
     amount: 1446,        // 已用
     limit: 3657,         // 已用 + 剩余
     unit: "¥",
-    aside: true,         // 读数，不参与路由的额度比较
+    // 参与路由的额度比较(不带 aside)
   },
   // 仅在有关键缺失时出现（纯文本，不带 used）
   { name: "Group keys", display: "no key: svip — sign in again to fix" },
@@ -507,7 +507,10 @@ windows = [
 ```
 
 - 总额 = `quota + used_quota`；站点按货币显示时按 `quota_per_unit` 和汇率换算，否则用原始 quota、`unit="quota"`。
-- `aside: true` 不是可有可无的。它让这个窗口**不进**额度走势（`quota_history.go` 的 `pointOf`）、**不算**整窗估算（没有重置时钟，否则卡片多一行「整窗：数据不足」）、**不参与**路由的额度比较（`allowanceOf` 跳过 aside）。钱包没有重置周期，Magpie 那套「用完就歇到下次重置」对它不成立。
+- **不带 `aside`**,这是 2026-11-02 改的。带 `aside` 的窗口会被 `allowanceOf`(`provider/routing.go`)整条跳过,于是 `routedAllowance` 返回 false、路由判定 `known=false`,路由页把每个 New API 账号都显示成「剩余额度未知」——可额度一直在读,Usage 页画得好好的。去掉 `aside` 后这个账号对路由是已知的:路由页显示已用百分比,Smart / Weekly pace / 最少使用按它排序。
+
+  - 代价:钱包没有重置时钟,**不进**额度走势(`quota_history.go` 的 `pointOf` 只跳过 aside,这里没 aside 了但窗口没有 `resetsAt`,曲线是平的),**算不出**整窗估算,卡片上多一行灰色的「整窗:数据不足」。这是这个窗口形状本身的代价。
+  - 早期(带 `aside`)的取舍是不让卡片多那行灰字,但那会让路由页对所有 New API 账号显示「剩余额度未知」,得不偿失。
 - 余额花光时由站点拒绝请求，fallback 照常换下一个账号，不需要 Magpie 预先排掉它。
 - 总额不到 0.01（没充过/没花过）时退回一行纯文本读数，不画 0% 进度条。
 - `plan` 用 `data.group`；`user` 用 `data.username`。
@@ -944,7 +947,7 @@ function modelEntry({ catalogId, md, group, model, proto, ratio, baseModel }) {
 1. `/v1/models`（每个分组 key）——权威：这个 key 能调用什么。
 2. `/api/pricing`——补充：`enable_groups`（哪些分组可用）、`supported_endpoint_types`（协议）、`group_ratio`（倍率）。
 3. `/api/user/models?group=`——当 `/api/pricing` 不可用时，作为分组→模型的来源。
-4. 如果都失败：抛出错误（Magpie 保留上次列表并显示 `listError`），而不是返回空列表把模型清空。
+4. 如果都失败:**不要抛错**——返回空对象并打上 `Object.defineProperty(empty, Symbol.for("magpie.fellBack"), {value:true})`。抛错会被 `host.js` 吞成 `{models: undefined}`(第 2 个及以后的账号走 `strict`,第一个账号的 `given.models` 也是空的),Magpie 就把账号的 `Models` 记成 nil;而 nil 在 `plugins.go` 的 `pluginLists`/`pluginServedCatalog` 里读作「服务全部模型」。带 `magpie.fellBack` 的显式空表让 `keepListed` 拿上次的列表顶上,原因显示在短列表上方。
 
 **过滤**：
 
@@ -1197,7 +1200,7 @@ checkin: GET /api/user/self/checkin → 已签？done
 ### 7.1 错误语义
 
 - **登录失败**：`authorize` 返回 `{type:"failed", error:"..."}`，消息短、可操作（最多 500 字符）。
-- **模型列表失败**：抛异常，Magpie 保留上次列表并在 provider 编辑器显示 `listError`；不要返回空表清空模型。
+- **模型列表失败**:返回空对象 + `Symbol.for("magpie.fellBack")` 标记,**不抛错**。抛错会让账号的 `Models` 变成 nil,而 nil 读作「服务全部模型」,账号于是出现在每个模型的候选池里;显式空表 + 标记则让 Magpie 保留上次列表并显示 `listError`。
 - **单个分组 key 失效**：只标记该 key bad，跳过该分组；不要让整个账号 lapsed。
 - **access token 失效**：`usage` 返回 `signIn:"kept"` + error；推理仍可用 group key。只有当所有分组 key 也不可用时，才考虑 `signIn:"expired"`。
 - **429**：同组换 key；全失败返回 429，让 Magpie 走路由 failover。

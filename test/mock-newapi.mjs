@@ -125,6 +125,8 @@ const GROUPS = {
  *   quotaPerUnit, quota, usedQuota（额度单位、余额、已用额度）
  *   leanList: bool                       （列表只回 id/name/key/status，分组与额度在详情里）
  *   multiGroup: bool                     （一个 token 的 groups 是数组，可勾多个分组）
+ *   modelsDown: bool                     (/v1/models 与 /api/user/models 都回 500:
+ *                                         读不到,不代表这个账号没有模型)
  */
 export async function startNewAPI(options = {}) {
   const state = {
@@ -132,6 +134,7 @@ export async function startNewAPI(options = {}) {
     // 列表接口是否精简、token 是否能勾多个分组：hyxware 那类站点。
     leanList: options.leanList ?? false,
     multiGroup: options.multiGroup ?? false,
+    modelsDown: options.modelsDown ?? false,
     detailsRead: 0,
     challenge: options.challenge ?? "",
     pricingClosed: options.pricingClosed ?? false,
@@ -202,6 +205,11 @@ export async function startNewAPI(options = {}) {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(payload));
     };
+
+    // 列举整体读不到(站点抖动):不是「这个账号没有模型」。
+    if (state.modelsDown && (url.pathname === "/v1/models" || url.pathname === "/v1beta/models" || url.pathname === "/api/user/models")) {
+      return json({ success: false, message: "the site is having a moment" }, 500);
+    }
 
     // ---- public ----
     if (url.pathname === "/api/status") {
